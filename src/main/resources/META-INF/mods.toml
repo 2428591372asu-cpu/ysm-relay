@@ -1,0 +1,53 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="Apache-2.0"
+issueTrackerURL="https://example.invalid/ysm-relay"
+
+# displayTest 必须写在 [[mods]] 块内，不是顶层、也不是 [[dependencies]]。
+# 依据（javap 读 Forge 1.20.1-47.4.3 的 ModContainer 构造函数字节码，不是查文档）：
+#   modInfo.getConfig().getConfigElement(["displayTest"]) → lookupswitch
+#   MATCH_VERSION → 默认版本比对；IGNORE_SERVER_VERSION → 只忽略「版本不同」；
+#   IGNORE_ALL_VERSION → IExtensionPoint.DisplayTest.IGNORE_ALL_VERSION（远端校验恒真）；
+#   NONE → 不注册校验。四个之外的值不是降级，是
+#   IllegalArgumentException("Invalid displayTest value supplied in mods.toml") 加载期硬崩。
+#
+# 选 IGNORE_ALL_VERSION：阿苏要求 C（只装 YSM、完全没装 relay）也能进服。
+# IGNORE_SERVER_VERSION 只覆盖「装了但版本不同」，客户端整个 mod 缺失时仍被拒。
+#
+# 另一条（写错会静默失效，别改）：ysm 依赖的 versionRange 是 "*"，不是 [3.0,4.0)。
+# 3.x 校验在运行期 YsmBridge#versionOk()。
+[[mods]]
+modId="ysm_relay"
+version="${mod_version}"
+displayName="YSM Model Relay"
+displayTest="IGNORE_ALL_VERSION"
+description='''
+客户端上传模型，服务端二次分发。
+'''
+
+[[dependencies.ysm_relay]]
+modId="forge"
+mandatory=true
+versionRange="[47,)"
+ordering="NONE"
+side="BOTH"
+
+[[dependencies.ysm_relay]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1,1.21)"
+ordering="NONE"
+side="BOTH"
+
+# relay 的上传/去重/授权全部走 YSM 的 Java 入口（ServerModelService、RawModelImporter、
+# AuthModelsCapability），没有 YSM 时这些类不存在，因此依赖为 mandatory。
+#
+# versionRange 故意写 *：YSM 的 dev 版本串是 3.0-dev-forge+mc1.20.1，按 Maven 版本序
+# 排在 3.0 之前，写 [3.0,4.0) 会把当前开发版判成不满足依赖，mod 直接不加载。
+# 真正的 3.x 校验放在 com.asu.ysmrelay.ysm.YsmBridge#versionOk()，运行期判定并降级，报错可读。
+[[dependencies.ysm_relay]]
+modId="ysm"
+mandatory=true
+versionRange="*"
+ordering="AFTER"
+side="BOTH"

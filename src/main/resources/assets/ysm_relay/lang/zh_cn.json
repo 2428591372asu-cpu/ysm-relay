@@ -1,0 +1,15 @@
+{
+  "key.categories.ysm_relay": "YSM 模型中转",
+  "key.ysm_relay.open_panel": "打开模型上传面板",
+  "screen.ysm_relay.upload.title": "模型上传",
+  "screen.ysm_relay.upload.upload": "上传",
+  "screen.ysm_relay.upload.cancel": "取消",
+  "screen.ysm_relay.upload.rescan": "重新扫描",
+  "screen.ysm_relay.upload.folder": "打开目录",
+  "screen.ysm_relay.upload.empty": "模型目录里没找到 .mxc / .ysm / .zip 文件",
+  "screen.ysm_relay.upload.count": "共 %s 个候选文件（递归扫描模型根）",
+  "screen.ysm_relay.upload.all": "全选",
+  "screen.ysm_relay.upload.none": "全不选",
+  "screen.ysm_relay.upload.selected": "已选 %s 个",
+  "screen.ysm_relay.model_screen.upload": "上传模型"
+}

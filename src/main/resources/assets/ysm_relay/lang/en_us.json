@@ -1,0 +1,15 @@
+{
+  "key.categories.ysm_relay": "YSM Model Relay",
+  "key.ysm_relay.open_panel": "Open Model Upload Panel",
+  "screen.ysm_relay.upload.title": "Model Upload",
+  "screen.ysm_relay.upload.upload": "Upload",
+  "screen.ysm_relay.upload.cancel": "Cancel",
+  "screen.ysm_relay.upload.rescan": "Rescan",
+  "screen.ysm_relay.upload.folder": "Open Folder",
+  "screen.ysm_relay.upload.empty": "No .mxc / .ysm / .zip files found under the model root",
+  "screen.ysm_relay.upload.count": "%s candidate file(s), scanned recursively",
+  "screen.ysm_relay.upload.all": "Select All",
+  "screen.ysm_relay.upload.none": "Select None",
+  "screen.ysm_relay.upload.selected": "%s selected",
+  "screen.ysm_relay.model_screen.upload": "Upload models"
+}

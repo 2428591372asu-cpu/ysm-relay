@@ -1,0 +1,144 @@
+plugins {
+    id 'java'
+    id 'idea'
+    id 'net.neoforged.moddev.legacyforge' version '2.+'
+}
+
+version = mod_version
+group = mod_group
+
+base {
+    archivesName = mod_id
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(17)
+}
+
+repositories {
+    mavenCentral()
+}
+
+// ---------------------------------------------------------------------------
+// YSM compileOnly 依赖
+//
+// YSM 主仓 (默认 ../ysm，可用环境变量 YSM_PROJECT_DIR 覆盖) 的
+// compileJava 已经成功过，build/classes/java/main 里有完整 class。
+// shadowJar 卡在缺 ysm.dll native，但本附属 mod 只需要「编译期类型」，
+// 不需要 native，所以直接把 class 目录打成本地 dev jar 挂 compileOnly。
+//
+// 目录约定（2026-11-04 整理后）：本工程 = DSHwork\YSM\relay，
+// YSM 主仓 = DSHwork\YSM\ysm，两者同级 ⇒ ../ysm。整理前的旧路径是 ../YesSteveModel。
+//
+// 运行时由真实安装的 ysm-3.0 jar 提供这些类，绝对不能打进本 mod 的 jar。
+// ---------------------------------------------------------------------------
+def ysmProjectDir = providers.environmentVariable('YSM_PROJECT_DIR')
+        .map { file(it) }
+        .getOrElse(file('../ysm'))
+def ysmClassesDir = new File(ysmProjectDir, 'build/classes/java/main')
+def ysmDevJarDir = layout.projectDirectory.dir('libs')
+def ysmDevJarName = 'ysm-3.0-dev-compileonly.jar'
+
+tasks.register('ysmDevJar', Jar) {
+    group = 'build setup'
+    description = '把 YSM 主仓的 compileJava 产物打成本地 compileOnly jar'
+    archiveFileName = ysmDevJarName
+    destinationDirectory = ysmDevJarDir
+    from(ysmClassesDir)
+    doFirst {
+        if (!ysmClassesDir.isDirectory()) {
+            throw new GradleException(
+                    "找不到 YSM 编译产物: ${ysmClassesDir}\n" +
+                    "请先在 YSM 主仓执行 compileJava（或设置环境变量 YSM_PROJECT_DIR 指向正确目录）。\n" +
+                    "当前 YSM_PROJECT_DIR = ${ysmProjectDir}")
+        }
+    }
+}
+
+dependencies {
+    compileOnly files(ysmDevJarDir.file(ysmDevJarName))
+}
+
+legacyForge {
+    version = "1.20.1-47.4.3"
+
+    parchment {
+        mappingsVersion = '+'
+        minecraftVersion = '1.20.1'
+    }
+
+    mods {
+        ysm_relay {
+            sourceSet sourceSets.main
+        }
+    }
+
+    runs {
+        client {
+            client()
+            gameDirectory = project.file('run/client')
+        }
+        server {
+            server()
+            gameDirectory = project.file('run/server')
+        }
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    dependsOn 'ysmDevJar'
+}
+
+processResources {
+    inputs.property 'mod_id', mod_id
+    inputs.property 'mod_version', project.version
+    filteringCharset 'UTF-8'
+    filesMatching('META-INF/mods.toml') {
+        expand 'mod_id': mod_id, 'mod_version': project.version
+    }
+}
+
+jar {
+    manifest {
+        attributes([
+                'Specification-Title'   : mod_id,
+                'Specification-Vendor'  : 'asu',
+                'Specification-Version' : '1',
+                'Implementation-Title'  : project.name,
+                'Implementation-Version': project.version,
+                'Implementation-Vendor' : 'asu'
+        ])
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 零依赖自检（M6）
+//
+// 为什么不用 JUnit：本机 gradle 缓存里只有 junit-bom（版本约束表，不含可执行代码），
+// junit-jupiter / junit-platform-* / opentest4j / apiguardian 一个都没有。引一个 @Test
+// 就要去 mavenCentral 拉一整串传递依赖，而编译侧能离线绿正是因为它不拉任何外部依赖。
+// 这些断言一个 JUnit 特性都用不到，写成 main() 里的 if + fail 与写成 @Test 信息量相同。
+//
+// 运行：gradlew verification --offline
+//   退出码 0 = 全过；1 = 有用例失败（会打印用例名与实测值）。
+//
+// 被测的是 ServerUpload：全工程唯一零 MC、零 YSM import 的类，却承载分包顺序 /
+// 重放拦截 / 超量拒收 / 空包拒收 / 封口条件。它不需要 Forge，也不需要 native。
+// ---------------------------------------------------------------------------
+sourceSets {
+    verification {
+        java.srcDir 'src/verification/java'
+        // javac 要解析 UploadChunk 的签名，所以借用 main 的编译期 classpath；
+        // 运行期只要 main 的产物 —— 被测类运行时不碰 Forge。
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+        runtimeClasspath += output + sourceSets.main.output
+    }
+}
+
+tasks.register('verification', JavaExec) {
+    group = 'verification'
+    description = '运行 relay 的零依赖自检（不需要 Forge、不需要 native、不需要联网）'
+    classpath = sourceSets.verification.runtimeClasspath
+    mainClass = 'com.asu.ysmrelay.upload.PieceStateMachineCheck'
+}
