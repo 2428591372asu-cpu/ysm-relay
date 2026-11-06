@@ -51,13 +51,8 @@ public final class ProbeReply {
         this.message = message == null ? "" : message;
     }
 
-    /**
-     * 准入通过但不限速。
-     *
-     * <p>保留这个两参重载是有意的：它能切断 W1（协议）与 W2（配置键）之间的编译期依赖 ——
-     * {@code UploadService} 先继续调两参版，W2 加上 {@code maxUploadBytesPerSecond} 键之后
-     * 再切成三参版，两边各改各的、谁先合都不炸。
-     */
+    /** 准入通过但不限速的便捷重载。 */
+
     public static ProbeReply allowed(long transferId, int chunkSize) {
         return allowed(transferId, chunkSize, 0);
     }

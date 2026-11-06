@@ -1,6 +1,12 @@
 package com.asu.ysmrelay.net;
 
+import com.asu.ysmrelay.net.msg.ConfigRequest;
+import com.asu.ysmrelay.net.msg.ConfigSnapshot;
+import com.asu.ysmrelay.net.msg.ConfigUpdate;
+import com.asu.ysmrelay.net.msg.DataReply;
+import com.asu.ysmrelay.net.msg.DataRequest;
 import com.asu.ysmrelay.net.msg.ProbeReply;
+import com.asu.ysmrelay.net.msg.UploadAbort;
 import com.asu.ysmrelay.net.msg.UploadChunk;
 import com.asu.ysmrelay.net.msg.UploadProbe;
 import com.asu.ysmrelay.net.msg.UploadProgress;
@@ -32,7 +38,7 @@ public final class RelayNetwork {
      * 老客户端 v1 的 {@code decode} 读不出新布局，所以必须升版本 —— 靠
      * {@link NetworkRegistry#acceptMissingOr(String)} 让版本不符的客户端进服但用不了上传。
      */
-    public static final String PROTOCOL_VERSION = "2";
+    public static final String PROTOCOL_VERSION = "10";
 
     public static final ResourceLocation CHANNEL_NAME = new ResourceLocation("ysm_relay", "upload");
 
@@ -41,6 +47,12 @@ public final class RelayNetwork {
     private static final int ID_PROBE_REPLY = 2;
     private static final int ID_PROGRESS = 3;
     private static final int ID_RESULT = 4;
+    private static final int ID_ABORT = 5;
+    private static final int ID_CONFIG_REQUEST = 6;
+    private static final int ID_CONFIG_SNAPSHOT = 7;
+    private static final int ID_CONFIG_UPDATE = 8;
+    private static final int ID_DATA_REQUEST = 9;
+    private static final int ID_DATA_REPLY = 10;
 
     private static SimpleChannel channel;
 
@@ -76,6 +88,42 @@ public final class RelayNetwork {
             .encoder(UploadProgress::encode)
             .decoder(UploadProgress::decode)
             .consumerMainThread(UploadProgress::handle)
+            .add();
+
+        created.messageBuilder(ConfigRequest.class, ID_CONFIG_REQUEST, NetworkDirection.PLAY_TO_SERVER)
+            .encoder(ConfigRequest::encode)
+            .decoder(ConfigRequest::decode)
+            .consumerMainThread(ConfigRequest::handle)
+            .add();
+
+        created.messageBuilder(ConfigSnapshot.class, ID_CONFIG_SNAPSHOT, NetworkDirection.PLAY_TO_CLIENT)
+            .encoder(ConfigSnapshot::encode)
+            .decoder(ConfigSnapshot::decode)
+            .consumerMainThread(ConfigSnapshot::handle)
+            .add();
+
+        created.messageBuilder(ConfigUpdate.class, ID_CONFIG_UPDATE, NetworkDirection.PLAY_TO_SERVER)
+            .encoder(ConfigUpdate::encode)
+            .decoder(ConfigUpdate::decode)
+            .consumerMainThread(ConfigUpdate::handle)
+            .add();
+
+        created.messageBuilder(DataRequest.class, ID_DATA_REQUEST, NetworkDirection.PLAY_TO_SERVER)
+            .encoder(DataRequest::encode)
+            .decoder(DataRequest::decode)
+            .consumerMainThread(DataRequest::handle)
+            .add();
+
+        created.messageBuilder(DataReply.class, ID_DATA_REPLY, NetworkDirection.PLAY_TO_CLIENT)
+            .encoder(DataReply::encode)
+            .decoder(DataReply::decode)
+            .consumerMainThread(DataReply::handle)
+            .add();
+
+        created.messageBuilder(UploadAbort.class, ID_ABORT, NetworkDirection.PLAY_TO_SERVER)
+            .encoder(UploadAbort::encode)
+            .decoder(UploadAbort::decode)
+            .consumerMainThread(UploadAbort::handle)
             .add();
 
         created.messageBuilder(UploadResult.class, ID_RESULT, NetworkDirection.PLAY_TO_CLIENT)

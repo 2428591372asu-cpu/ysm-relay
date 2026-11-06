@@ -12,14 +12,14 @@ import com.elfmcys.ysm.model.domain.Hash256;
  *
  * <h2>谁实现、谁调用</h2>
  * <ul>
- *   <li><b>实现与 install()：W3 的 {@code PendingQueue}，且只有它一个。</b></li>
- *   <li><b>读：探测阶段的 {@link UploadService#onProbe}。</b>只调 {@link #contains} 与 {@link #size}。</li>
+ *   <li><b>实现与 install()：{@link PendingQueue}，且只有它一个。</b></li>
+ *   <li><b>读：探测阶段的 {@link UploadService}。</b>只调 {@link #contains} 与 {@link #size}。</li>
  * </ul>
  *
- * <p>W3 落地之前 {@link #current()} 返回 {@link #EMPTY}，探测行为与现在完全一致
- * （永不命中、size 恒为 0），所以这个接口可以先合、不会让上传通道空转。
+ * <p>{@link #current()} 在 {@code RelayBootstrap} 之前返回 {@link #EMPTY}
+ * （永不命中、size 恒为 0），因此服务端刚起来的那一小段时间探测也不会空转。
  *
- * <p><b>不要在探测路径上调 {@link #add} / {@link #remove}</b>：那两个的调用方是 W3 的审核队列。
+ * <p><b>不要在探测路径上调 {@link #add} / {@link #remove}</b>：那两个的调用方是审核队列。
  * 探测是多玩家并发进来的，索引的写入必须由队列自己串行保证。
  */
 public interface PendingIndex {
@@ -52,13 +52,13 @@ public interface PendingIndex {
     /** 当前排队条数。用于「队列满 → REJECTED_QUEUE_FULL」的判定。 */
     int size();
 
-    /** 入队时由 W3 调用。 */
+    /** 入队时由审核队列调用。 */
     void add(Hash256 modelId, String reviewId);
 
-    /** 审核结束（批准 / 拒绝 / 过期）时由 W3 调用。 */
+    /** 审核结束（批准 / 拒绝 / 过期）时由审核队列调用。 */
     void remove(Hash256 modelId);
 
-    /** 由 W3 在启动时装一次；传 {@code null} 等于卸回空实现。 */
+    /** 启动时装一次；传 {@code null} 等于卸回空实现。 */
     static void install(PendingIndex index) {
         Holder.CURRENT = index == null ? EMPTY : index;
     }

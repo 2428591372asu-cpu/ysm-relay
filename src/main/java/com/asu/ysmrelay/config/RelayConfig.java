@@ -1,5 +1,12 @@
 package com.asu.ysmrelay.config;
 
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
 import net.minecraftforge.common.ForgeConfigSpec;
 
 /**
@@ -14,8 +21,9 @@ import net.minecraftforge.common.ForgeConfigSpec;
  * {@code server.getWorldPath(new LevelResource("serverconfig"))}）。专用服务器的默认路径是
  * {@code world/serverconfig/ysm-relay-server.toml}，首次起服生成，改完重启生效。
  *
- * <p><b>键的归属</b>：{@code [upload]} 段由 W2 用；{@code [review]} 段的审批与同步键由 W3 / W9 读，
- * 两个模块都不要再往本类加键 —— 键表在 {@code docs/PLAN.md} §7 一次性定死，加键要先改那张表。
+ * <p><b>分段</b>：{@code [upload]} 放上传准入与磁盘守卫；{@code [review]} 放审批、同步与权限等级。
+ * 加键时三处要一起改：本类的定义、{@code option()} 里登记的等级、以及
+ * {@code RelayConfigSync} 的快照读写（设置页靠它下发与回写）。
  */
 public final class RelayConfig {
     public static final ForgeConfigSpec SPEC;
@@ -69,7 +77,7 @@ public final class RelayConfig {
     public static final ForgeConfigSpec.IntValue MAX_CONCURRENT_CONVERSIONS;
 
     // ------------------------------------------------------------------
-    // [review] 审批、同步、权限（W3 / W9 只读，键表见 PLAN §7）
+    // [review] 审批、同步、权限
     // ------------------------------------------------------------------
 
     /** 是否自动同意上传。{@code false} = 逐次审（收妥后进待审队列）。 */
@@ -81,6 +89,24 @@ public final class RelayConfig {
     public static final ForgeConfigSpec.LongValue AUTO_APPROVE_MAX_BYTES;
     /** 待审队列容量。满了在探测阶段就回 {@code REJECTED_QUEUE_FULL}。 */
     public static final ForgeConfigSpec.IntValue MAX_PENDING_COUNT;
+    /** 审批模式下每个玩家最多能攒多少个未处理的上传。 */
+    public static final ForgeConfigSpec.IntValue MAX_PENDING_PER_PLAYER;
+    /** 上传白名单：名单内玩家不受待审上限、个人配额与权限等级限制，且跳过审核。 */
+    public static final ForgeConfigSpec.ConfigValue<List<? extends String>> UPLOAD_WHITELIST;
+    /** 手动授予的等级，条目形如 {@code <uuid>:<1-3>}。 */
+    public static final ForgeConfigSpec.ConfigValue<List<? extends String>> LEVEL_GRANTS;
+
+    /** 「我的上传 / 待审」列表一次最多回传多少条。 */
+    public static final ForgeConfigSpec.IntValue LIST_MAX_ENTRIES;
+
+    /**
+     * 上传后的处理模式：{@code review} 全部待审、{@code auto} 超上限转待审、
+     * {@code full} 超上限直接拒收。
+     */
+    public static final ForgeConfigSpec.ConfigValue<String> UPLOAD_MODE;
+
+    /** 每个选项所需等级的注册表，{@code [permissions]} 段填充。 */
+    private static final Map<String, ForgeConfigSpec.IntValue> OPTION_LEVELS = new LinkedHashMap<>();
     /** 待审保留时长（小时）。超期自动按过期拒绝并删掉待审目录。 */
     public static final ForgeConfigSpec.IntValue PENDING_TTL_HOURS;
     /**
@@ -88,10 +114,26 @@ public final class RelayConfig {
      * {@code false} = 文件照样落盘，但不 reload，等服主手动触发。
      */
     public static final ForgeConfigSpec.BooleanValue AUTO_SYNC;
-    /** 处理上传请求（审批）所需的权限等级。 */
-    public static final ForgeConfigSpec.IntValue APPROVE_PERMISSION_LEVEL;
-    /** 管理模型使用权（grant / revoke / move）所需的权限等级。 */
-    public static final ForgeConfigSpec.IntValue ACCESS_PERMISSION_LEVEL;
+    /** 拒绝一切上传。优先级高于其它所有开关。 */
+    public static final ForgeConfigSpec.BooleanValue REJECT_ALL_UPLOADS;
+    /** 是否允许客户端使用「自动上传目录」。关掉后只禁自动上传，手动上传不受影响。 */
+    public static final ForgeConfigSpec.BooleanValue ALLOW_AUTO_UPLOAD;
+    /** 两次自动同步之间至少间隔多少秒，防止连续上传把 reload 打爆。 */
+    public static final ForgeConfigSpec.IntValue AUTO_SYNC_MIN_INTERVAL_SECONDS;
+    /**
+     * 客户端自动上传目录的扫描间隔（秒）。0 = 用文件监听（推荐，几乎零开销）；
+     * 大于 0 时改为轮询，用于网络盘等监听不可靠的目录。
+     */
+    public static final ForgeConfigSpec.IntValue AUTO_UPLOAD_SCAN_SECONDS;
+    /** 被拉黑的玩家（UUID）：服务端不接收这些人上传的模型。 */
+    public static final ForgeConfigSpec.ConfigValue<List<? extends String>> BLOCKED_UPLOADERS;
+
+    /** 可以处理上传请求的玩家（UUID）。空表时只有服主（权限 4）能处理。 */
+    public static final ForgeConfigSpec.ConfigValue<List<? extends String>> APPROVE_GROUP;
+    /** 可以管理模型使用权的玩家（UUID）。空表时只有服主（权限 4）能管理。 */
+    public static final ForgeConfigSpec.ConfigValue<List<? extends String>> MANAGE_GROUP;
+
+
 
     static {
         var builder = new ForgeConfigSpec.Builder();
@@ -107,7 +149,9 @@ public final class RelayConfig {
 
         CHUNK_BYTES = builder
             .comment("Chunk size the server asks clients to use.")
-            .defineInRange("chunkBytes", 32 * 1024, 4096, 512 * 1024);
+            // Minecraft 的自定义负载上限是 32767 字节，超一个字节就断线。
+            // 留足包头余量，默认 16 KiB，上限也压到 16 KiB。
+            .defineInRange("chunkBytes", 16 * 1024, 4096, 16 * 1024);
 
         MAX_BYTES_PER_PLAYER = builder
             .comment("Total bytes one player may have uploaded. 0 disables the limit.",
@@ -148,6 +192,16 @@ public final class RelayConfig {
                 "which controls server to client distribution.")
             .defineInRange("maxUploadBytesPerSecond", 2 * 1024 * 1024, 0, Integer.MAX_VALUE);
 
+        REJECT_ALL_UPLOADS = builder
+            .comment("Reject every upload from players, regardless of other switches.",
+                "Overrides allowPlayerUpload and every other upload setting.")
+            .define("rejectAllUploads", false);
+
+        ALLOW_AUTO_UPLOAD = builder
+            .comment("Allow clients to auto-upload files dropped into a watched folder.",
+                "Turning this off only disables the automatic path; players can still pick files manually.")
+            .define("allowAutoUpload", true);
+
         MAX_CONCURRENT_CONVERSIONS = builder
             .comment("How many model conversions may run at the same time. Capped at 2.",
                 "Deliberately its own bounded pool: sharing YSM's ThreadCount shows up as",
@@ -171,6 +225,18 @@ public final class RelayConfig {
             .comment("How many uploads may wait for review at once. Full queue rejects at probe time.")
             .defineInRange("maxPendingCount", 8, 1, 256);
 
+        MAX_PENDING_PER_PLAYER = builder
+            .comment("In review mode, how many unreviewed uploads one player may keep queued.",
+                "Reaching it blocks further uploads from that player until the owner acts.")
+            .defineInRange("maxPendingPerPlayer", 8, 0, 256);
+
+        UPLOAD_WHITELIST = builder
+            .comment("UUIDs allowed to upload freely: no pending cap, no per-player quota, no review.",
+                "Resource guards still apply: rejectAllUploads, blocklist, model size, total quota.",
+                "Managed with /ysmrelay whitelist add|remove|list.")
+            .defineList("uploadWhitelist", List.of(),
+                value -> value instanceof String text && text.length() == 36);
+
         PENDING_TTL_HOURS = builder
             .comment("How long a pending upload is kept before it expires and gets cleaned up.")
             .defineInRange("pendingTtlHours", 72, 1, 24 * 30);
@@ -180,20 +246,152 @@ public final class RelayConfig {
                 "false places the file but leaves it invisible until the owner triggers a sync.")
             .define("autoSync", true);
 
-        APPROVE_PERMISSION_LEVEL = builder
-            .comment("Permission level required to handle upload requests.")
-            .defineInRange("approvePermissionLevel", 2, 0, 4);
+        AUTO_SYNC_MIN_INTERVAL_SECONDS = builder
+            .comment("Shortest gap between two automatic reloads, in seconds.",
+                "Several uploads landing together are merged into one reload window.")
+            .defineInRange("autoSyncMinIntervalSeconds", 15, 0, 3600);
 
-        ACCESS_PERMISSION_LEVEL = builder
-            .comment("Permission level required to change which player may use which model.")
-            .defineInRange("accessPermissionLevel", 2, 0, 4);
+        BLOCKED_UPLOADERS = builder
+            .comment("UUIDs whose uploads this server refuses. Existing models they uploaded stay.",
+                "Managed with /ysmrelay blockuploader add|remove|list.")
+            .defineList("blockedUploaders", List.of(),
+                value -> value instanceof String text && text.length() == 36);
 
+        UPLOAD_MODE = builder
+            .comment("What happens to a finished upload.",
+                "review = everything waits for approval;",
+                "auto = under the cap goes in directly, bigger ones wait for approval;",
+                "full = under the cap goes in directly, bigger ones are rejected outright.",
+                "Switched in-game with the mode button; permission level 3.")
+            .define("uploadMode", "review", value -> value instanceof String text
+                && (text.equals("review") || text.equals("auto") || text.equals("full")));
+
+        LIST_MAX_ENTRIES = builder
+            .comment("How many rows the upload / pending list may return in one reply.",
+                "Hard byte budget applies anyway, so huge values cannot blow up the packet.")
+            .defineInRange("listMaxEntries", 200, 8, 32767);
+
+        AUTO_UPLOAD_SCAN_SECONDS = builder
+            .comment("How the client watches the auto-upload folder.",
+                "0 = filesystem watch (near-zero cost, recommended).",
+                "Above 0 = poll every N seconds, for folders where watching is unreliable (network shares).")
+            .defineInRange("autoUploadScanSeconds", 0, 0, 3600);
+
+        APPROVE_GROUP = builder
+            .comment("UUIDs allowed to handle upload requests.",
+                "Empty falls back to approvePermissionLevel (default 2, i.e. operators).")
+            .defineList("approveGroup", List.of(), value -> value instanceof String text && text.length() == 36);
+
+        MANAGE_GROUP = builder
+            .comment("UUIDs allowed to change which player may use which model.",
+                "Empty falls back to accessPermissionLevel (default 2, i.e. operators).")
+            .defineList("manageGroup", List.of(), value -> value instanceof String text && text.length() == 36);
+
+        builder.pop();
+
+        builder.comment("Required user level for each option.",
+            "1 = every player, 2 = permission groups and operators, 3 = owner.",
+            "Levels can be granted manually with /ysmrelay level grant <player> <1-3>.")
+            .push("permissions");
+        option(builder, "allowPlayerUpload", 3);
+        option(builder, "rejectAllUploads", 3);
+        option(builder, "allowAutoUpload", 3);
+        option(builder, "uploadMode", 3);
+        option(builder, "autoApproveMaxBytes", 3);
+        option(builder, "autoSync", 3);
+        option(builder, "autoSyncMinIntervalSeconds", 3);
+        option(builder, "autoUploadScanSeconds", 3);
+        option(builder, "maxPendingCount", 2);
+        option(builder, "maxPendingPerPlayer", 3);
+        option(builder, "maxModelBytes", 3);
+        option(builder, "maxBytesPerPlayer", 2);
+        option(builder, "maxTotalBytes", 2);
+        option(builder, "uploadPermissionLevel", 3);
+        option(builder, "approveUploads", 2);
+        option(builder, "manageRights", 2);
+        option(builder, "blockUploaders", 2);
+        option(builder, "uploadWhitelist", 2);
+        option(builder, "groupManage", 3);
+        option(builder, "listMaxEntries", 3);
+        LEVEL_GRANTS = builder
+            .comment("Manual level grants, one entry per player, formatted <uuid>:<level>.")
+            .defineList("levelGrants", List.of(),
+                value -> value instanceof String text && text.contains(":") && text.length() <= 80);
         builder.pop();
 
         SPEC = builder.build();
     }
 
     private RelayConfig() {}
+
+    private static void option(ForgeConfigSpec.Builder builder, String name, int defaultLevel) {
+        OPTION_LEVELS.put(name,
+            builder.comment("Required level for " + name).defineInRange(name, defaultLevel, 1, 3));
+    }
+
+    /** 某个选项需要的等级；没登记的按只有服主可用处理。 */
+    public static int levelOf(String option) {
+        var value = OPTION_LEVELS.get(option);
+        return value == null ? 3 : value.get();
+    }
+
+    /** 所有选项的等级快照，发给客户端决定按钮是否可用。 */
+    public static Map<String, Integer> optionLevels() {
+        var result = new LinkedHashMap<String, Integer>();
+        for (var entry : OPTION_LEVELS.entrySet()) {
+            result.put(entry.getKey(), entry.getValue().get());
+        }
+        return result;
+    }
+
+    /** 手动授予的等级（uuid → 等级，取最高）。 */
+    public static int grantedLevel(String uuid) {
+        if (uuid == null || uuid.isEmpty()) {
+            return 0;
+        }
+        var best = 0;
+        for (var raw : LEVEL_GRANTS.get()) {
+            if (raw == null) {
+                continue;
+            }
+            var text = raw.trim().toLowerCase(Locale.ROOT);
+            var split = text.lastIndexOf(':');
+            if (split <= 0) {
+                continue;
+            }
+            if (!text.substring(0, split).equals(uuid.toLowerCase(Locale.ROOT))) {
+                continue;
+            }
+            try {
+                best = Math.max(best, Integer.parseInt(text.substring(split + 1).trim()));
+            } catch (NumberFormatException ignored) {
+                // 坏条目跳过
+            }
+        }
+        return Math.min(best, 3);
+    }
+
+    /** 改写等级授予表。 */
+    public static void setLevelGrants(Set<String> entries) {
+        LEVEL_GRANTS.set(List.copyOf(entries));
+    }
+
+    /** 现有的等级授予条目（原样）。 */
+    public static Set<String> levelGrants() {
+        var result = new LinkedHashSet<String>();
+        for (var raw : LEVEL_GRANTS.get()) {
+            if (raw != null && !raw.isBlank()) {
+                result.add(raw.trim().toLowerCase(Locale.ROOT));
+            }
+        }
+        return result;
+    }
+
+    /** 实际下发给客户端的分片大小，硬顶 16 KiB，老配置里的超大值也压回安全线。 */
+    public static int safeChunkBytes() {
+        var raw = CHUNK_BYTES.get();
+        return Math.max(4096, Math.min(16 * 1024, raw));
+    }
 
     /** 上限字节数；0 或负数表示不限制。 */
     public static long maxModelBytes() {
@@ -262,18 +460,112 @@ public final class RelayConfig {
         return AUTO_SYNC.get();
     }
 
-    /** 处理上传请求所需的权限等级。 */
-    public static int approvePermissionLevel() {
-        return APPROVE_PERMISSION_LEVEL.get();
-    }
-
-    /** 管理模型使用权所需的权限等级。 */
-    public static int accessPermissionLevel() {
-        return ACCESS_PERMISSION_LEVEL.get();
-    }
-
     /** 上传是否应该落进 auth 根。 */
     public static boolean targetAuthRoot() {
         return "auth".equalsIgnoreCase(TARGET_ROOT.get());
+    }
+
+    /** 服务端是否拒绝一切上传。 */
+    public static boolean rejectAllUploads() {
+        return REJECT_ALL_UPLOADS.get();
+    }
+
+    /** 是否允许客户端自动上传目录里的模型。 */
+    public static boolean allowAutoUpload() {
+        return ALLOW_AUTO_UPLOAD.get();
+    }
+
+    /** 归一化后的上传模式：review / auto / full。旧配置里 autoApprove=true 视为 auto。 */
+    public static String uploadMode() {
+        var raw = UPLOAD_MODE.get();
+        if (raw != null) {
+            var text = raw.trim().toLowerCase(Locale.ROOT);
+            if (text.equals("auto") || text.equals("full")) {
+                return text;
+            }
+            if (text.equals("review")) {
+                // 老版本把「自动同意」放在布尔键里，升级后第一次读到时迁移过来。
+                // 界面切档时会同时写 autoApprove，所以这条只对旧配置生效。
+                return AUTO_APPROVE.get() ? "auto" : "review";
+            }
+        }
+        return AUTO_APPROVE.get() ? "auto" : "review";
+    }
+
+    /** 写模式，并同步旧布尔键，避免下一次读到时被迁移逻辑覆盖。 */
+    public static void setUploadMode(String mode) {
+        var normalized = mode == null ? "review" : mode.trim().toLowerCase(Locale.ROOT);
+        if (!normalized.equals("auto") && !normalized.equals("full")) {
+            normalized = "review";
+        }
+        UPLOAD_MODE.set(normalized);
+        AUTO_APPROVE.set(!normalized.equals("review"));
+    }
+
+    /** 列表一次最多回传多少条。 */
+    public static int listMaxEntries() {
+        return LIST_MAX_ENTRIES.get();
+    }
+
+    /** 审批模式下每人的待审上限。 */
+    public static int maxPendingPerPlayer() {
+        return MAX_PENDING_PER_PLAYER.get();
+    }
+
+    /** 上传白名单（小写 UUID 集合）。 */
+    public static Set<String> uploadWhitelist() {
+        return normalizeGroup(UPLOAD_WHITELIST.get());
+    }
+
+    /** 改写上传白名单（即时生效并落盘）。 */
+    public static void setUploadWhitelist(Set<String> uuids) {
+        UPLOAD_WHITELIST.set(List.copyOf(uuids));
+    }
+
+    /** 客户端扫描自动上传目录的方式：0 = 文件监听，>0 = 轮询秒数。 */
+    public static int autoUploadScanSeconds() {
+        return AUTO_UPLOAD_SCAN_SECONDS.get();
+    }
+
+    /** 自动同步的最短间隔（毫秒），与内部的 500ms 合并窗口取较大值。 */
+    public static long autoSyncMinIntervalMillis() {
+        return AUTO_SYNC_MIN_INTERVAL_SECONDS.get() * 1000L;
+    }
+
+    /** 被拉黑的上传者 UUID 集合（小写）。 */
+    public static Set<String> blockedUploaders() {
+        return normalizeGroup(BLOCKED_UPLOADERS.get());
+    }
+
+    /** 改写拉黑名单（即时生效并落盘）。 */
+    public static void setBlockedUploaders(Set<String> uuids) {
+        BLOCKED_UPLOADERS.set(List.copyOf(uuids));
+    }
+
+    /** 可以处理上传请求的 UUID 集合（小写）。 */
+    public static Set<String> approveGroup() {
+        return normalizeGroup(APPROVE_GROUP.get());
+    }
+
+    /** 可以管理模型使用权的 UUID 集合（小写）。 */
+    public static Set<String> manageGroup() {
+        return normalizeGroup(MANAGE_GROUP.get());
+    }
+
+    private static Set<String> normalizeGroup(List<? extends String> raw) {
+        if (raw == null || raw.isEmpty()) {
+            return Set.of();
+        }
+        var result = new LinkedHashSet<String>();
+        for (var value : raw) {
+            if (value == null) {
+                continue;
+            }
+            var text = value.trim().toLowerCase(Locale.ROOT);
+            if (!text.isEmpty()) {
+                result.add(text);
+            }
+        }
+        return Set.copyOf(result);
     }
 }

@@ -16,6 +16,30 @@ import net.minecraftforge.fml.common.Mod;
 public final class RelayServerEvents {
     private RelayServerEvents() {}
 
+    /** 启动时把三个关键目录打进日志：确认上传到底会落到哪，比事后猜快得多。 */
+    @SubscribeEvent
+    public static void onServerStarted(net.minecraftforge.event.server.ServerStartedEvent event) {
+        try {
+            YsmRelay.LOGGER.info("[ysm-relay] 上传根={}", com.asu.ysmrelay.upload.RelayPaths.uploadRoot());
+            YsmRelay.LOGGER.info("[ysm-relay] 授权根={}", com.asu.ysmrelay.upload.RelayPaths.authRoot());
+            YsmRelay.LOGGER.info("[ysm-relay] 暂存根={} 待审根={}",
+                com.asu.ysmrelay.upload.RelayPaths.stagingRoot(),
+                com.asu.ysmrelay.upload.RelayPaths.pendingRoot());
+            YsmRelay.LOGGER.info("[ysm-relay] targetRoot={}",
+                com.asu.ysmrelay.config.RelayConfig.targetAuthRoot() ? "auth" : "custom");
+        } catch (RuntimeException failure) {
+            YsmRelay.LOGGER.warn("[ysm-relay] 启动时读取目录失败", failure);
+        }
+    }
+
+    /** 玩家进服就下发一份分发设置快照，客户端据此决定哪些按钮可用。 */
+    @SubscribeEvent
+    public static void onLogin(PlayerEvent.PlayerLoggedInEvent event) {
+        if (event.getEntity() instanceof net.minecraft.server.level.ServerPlayer player) {
+            com.asu.ysmrelay.config.RelayConfigSync.send(player);
+        }
+    }
+
     @SubscribeEvent
     public static void onLogout(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() instanceof net.minecraft.server.level.ServerPlayer player) {

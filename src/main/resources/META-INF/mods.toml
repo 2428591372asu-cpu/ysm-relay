@@ -1,7 +1,7 @@
 modLoader="javafml"
 loaderVersion="[47,)"
 license="Apache-2.0"
-issueTrackerURL="https://example.invalid/ysm-relay"
+issueTrackerURL="https://github.com/2428591372asu-cpu/ysm-relay/issues"
 
 # displayTest 必须写在 [[mods]] 块内，不是顶层、也不是 [[dependencies]]。
 # 依据（javap 读 Forge 1.20.1-47.4.3 的 ModContainer 构造函数字节码，不是查文档）：
@@ -19,7 +19,7 @@ issueTrackerURL="https://example.invalid/ysm-relay"
 [[mods]]
 modId="ysm_relay"
 version="${mod_version}"
-displayName="YSM Model Relay"
+displayName="ysmrelay"
 displayTest="IGNORE_ALL_VERSION"
 description='''
 客户端上传模型，服务端二次分发。

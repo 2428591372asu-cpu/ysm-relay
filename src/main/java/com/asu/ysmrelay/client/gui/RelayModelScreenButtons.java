@@ -1,8 +1,10 @@
 package com.asu.ysmrelay.client.gui;
 
 import com.asu.ysmrelay.YsmRelay;
+import com.asu.ysmrelay.client.ClientSettings;
 import com.asu.ysmrelay.client.ClientUploads;
-import com.asu.ysmrelay.client.UploadPanelScreen;
+import com.asu.ysmrelay.client.RelayMissingScreen;
+import com.asu.ysmrelay.client.SingleplayerUnavailableScreen;
 import com.asu.ysmrelay.ysm.YsmBridge;
 
 import net.minecraft.client.Minecraft;
@@ -104,7 +106,15 @@ public final class RelayModelScreenButtons {
             // 没进世界就没有模型根可扫，弹面板只会是一片空列表。
             return;
         }
-        minecraft.setScreen(new UploadPanelScreen());
+        if (ClientSettings.isRelayMissing()) {
+            minecraft.setScreen(new RelayMissingScreen(event.getScreen()));
+            return;
+        }
+        if (SingleplayerUnavailableScreen.isActive()) {
+            minecraft.setScreen(new SingleplayerUnavailableScreen(event.getScreen()));
+            return;
+        }
+        minecraft.setScreen(new com.asu.ysmrelay.client.SettingsScreen(event.getScreen()));
     }
 
     private static int buttonLeft(Screen screen) {

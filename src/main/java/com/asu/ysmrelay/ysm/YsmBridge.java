@@ -10,10 +10,8 @@ import com.elfmcys.ysm.model.domain.Hash256;
 import com.elfmcys.ysm.model.domain.ModelPackDescriptor;
 import com.elfmcys.ysm.model.service.ServerModelService;
 import com.elfmcys.ysm.model.storage.ManagedContainer;
-import com.elfmcys.ysm.model.storage.ModelHashing;
 import com.elfmcys.ysm.network.forge.SessionProtocolHandler;
 
-import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -63,11 +61,6 @@ public final class YsmBridge {
     public static boolean versionOk() {
         var version = ysmVersion().orElse(null);
         return version != null && majorOf(version) == 3;
-    }
-
-    /** 适配层可用 = YSM 版本受支持且服务端模型服务已建立。 */
-    public static boolean available() {
-        return versionOk() && serverReady();
     }
 
     private static int majorOf(String version) {
@@ -154,11 +147,6 @@ public final class YsmBridge {
             }
         }
         return Optional.empty();
-    }
-
-    /** 文件内容哈希（BLAKE3，与 YSM 同一实现）。用于上传去重键与服务端重算校验。 */
-    public static Hash256 fileHash(Path file) throws IOException {
-        return ModelHashing.blake3(file);
     }
 
     /** 触发服务端目录重扫；上传落盘后必须调用。 */
@@ -263,13 +251,6 @@ public final class YsmBridge {
             }
             selection.markDirty();
         });
-    }
-
-    /** 清空玩家授权。 */
-    public static void clearGrants(ServerPlayer player) {
-        player.getCapability(AuthModelsCapabilityProvider.AUTH_MODELS_CAP)
-            .ifPresent(AuthModelsCapability::clear);
-        refreshGrants(player);
     }
 
     /** 把授权变化同步到客户端；YSM 内部会重发该玩家的目录可见性。 */

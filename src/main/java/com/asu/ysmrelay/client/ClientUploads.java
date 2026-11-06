@@ -2,6 +2,7 @@ package com.asu.ysmrelay.client;
 
 import com.asu.ysmrelay.net.RelayNetwork;
 import com.asu.ysmrelay.net.msg.ProbeReply;
+import com.asu.ysmrelay.net.msg.UploadAbort;
 import com.asu.ysmrelay.net.msg.UploadChunk;
 import com.asu.ysmrelay.net.msg.UploadProbe;
 import com.asu.ysmrelay.net.msg.UploadProgress;
@@ -125,11 +126,6 @@ public final class ClientUploads {
         return snapshot == Phase.HASHING || snapshot == Phase.PROBING || snapshot == Phase.SENDING;
     }
 
-    /** 这一批总共几个文件。 */
-    public static int batchTotal() {
-        return batchTotal;
-    }
-
     /** 队列里还没开始的个数，不含正在传的那个。 */
     public static int queuedCount() {
         synchronized (pending) {
@@ -198,6 +194,7 @@ public final class ClientUploads {
     /** 取消这一整批：清掉还没开始的，并让正在传的那个停下来。 */
     public static void cancel() {
         if (!busy()) {
+            say("当前没有进行中的上传");
             return;
         }
         cancelled.set(true);
@@ -207,7 +204,17 @@ public final class ClientUploads {
             }
             pending.clear();
         }
-        finish("已取消", Outcome.CANCELLED);
+        // 通知服务端释放槽位：不发这条的话，玩家取消后再传会被判 REJECTED_BUSY。
+        var active = transferId;
+        if (active != 0L) {
+            RelayNetwork.toServer(new UploadAbort(active));
+        }
+        // HASHING / PROBING 没有发送循环在跑，必须在这里收尾；
+        // SENDING 交给发送线程：它看到取消位会自己 finish，这里抢先收尾会重复。
+        var snapshot = phase;
+        if (snapshot == Phase.HASHING || snapshot == Phase.PROBING) {
+            finish("已取消", Outcome.CANCELLED);
+        }
     }
 
     /** 取队列里的下一个开始，队列空了就收尾。持有 pending 锁调用。 */
@@ -226,6 +233,7 @@ public final class ClientUploads {
 
     /** 真正开始传一个文件。与旧的 start 逻辑一致，只是不再做 busy 判定。 */
     private static void startOne(Path file) {
+        cancelled.set(false);
         currentFile = file;
         currentModelId = null;
         transferId = 0L;
@@ -263,9 +271,13 @@ public final class ClientUploads {
      * <p>服务端若违反协议回了终态成功值，走 {@code default} 当无效响应 —— 客户端不做容错猜测。
      */
     public static void handleProbeReply(ProbeReply message) {
+        if (!busy()) {
+            return;
+        }
         if (message.allowed()) {
             transferId = message.transferId;
-            chunkSize = Math.max(4096, message.chunkSize);
+            // 服务端给多少都要再夹一次：单包超过 32767 字节会被 MC 判非法并直接断线。
+        chunkSize = Math.max(4096, Math.min(16 * 1024, message.chunkSize));
             rateLimitBytesPerSecond = Math.max(0, message.rateLimitBytesPerSecond);
             phase = Phase.SENDING;
             statusLine = rateLimitBytesPerSecond > 0
@@ -294,6 +306,9 @@ public final class ClientUploads {
     }
 
     public static void handleResult(UploadResult message) {
+        if (!busy()) {
+            return;
+        }
         // transferId 必须严格相等。旧代码写成 `transferId != 0L` 当例外，
         // 导致本地 transferId 还是 0 时任何一条结果包都会被当成自己的。
         if (message.transferId != transferId) {
@@ -404,7 +419,8 @@ public final class ClientUploads {
         }
         lastDetail = line == null ? "" : line;
         statusLine = lastDetail;
-        cancelled.set(false);
+        // 取消位不在这里清：发送线程的循环条件是 !cancelled，先清掉会让它继续传。
+        // 清位交给 startOne()，只在真正开始下一个文件时复位。
         advance();
     }
 

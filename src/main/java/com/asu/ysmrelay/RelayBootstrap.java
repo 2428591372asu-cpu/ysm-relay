@@ -8,6 +8,8 @@ import net.minecraftforge.fml.config.ModConfig;
 import net.minecraftforge.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.minecraftforge.fml.event.lifecycle.FMLConstructModEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
+import com.asu.ysmrelay.upload.PendingIndex;
+import com.asu.ysmrelay.upload.PendingQueue;
 import net.minecraftforge.fml.common.Mod;
 
 /**
@@ -32,6 +34,9 @@ public final class RelayBootstrap {
     public static void onCommonSetup(FMLCommonSetupEvent event) {
         // messageBuilder 必须在 setup 阶段同步完成，不能进 enqueueWork。
         RelayNetwork.init();
+        // 装载待审队列并接到探测阶段的判重口上。
+        PendingQueue.get().loadOnce();
+        PendingIndex.install(PendingQueue.get());
         YsmRelay.LOGGER.info("[ysm-relay] 上传通道已注册：{} v{}", RelayNetwork.CHANNEL_NAME,
             RelayNetwork.PROTOCOL_VERSION);
     }

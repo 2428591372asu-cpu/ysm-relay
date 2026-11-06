@@ -122,25 +122,117 @@ public final class ModelPlacement {
      * 撤销在线玩家 grant 是三个不同的动作，混进这里会让失败无法分辨。
      */
     public static DeleteResult delete(Hash256 modelId) {
-        var source = YsmBridge.modelFile(modelId).orElse(null);
-        if (source == null) {
+        return delete(modelId, null);
+    }
+
+    /**
+     * 删掉一个模型：既清源文件，也清 YSM 的转换缓存。
+     *
+     * <p>为什么两处都要删：YSM 导入 custom 里的源文件后，会把编译产物放进
+     * {@code cache/converted/<源哈希>/objects/<modelId>/}，目录真正指向的是缓存里的容器。
+     * 只删源文件，模型还在缓存里；只删缓存，下次重扫又会从源文件再导入一次。
+     *
+     * @param fileNameHint 台账里记的原始文件名，用来在 custom/auth 里找到对应源文件
+     */
+    public static DeleteResult delete(Hash256 modelId, String fileNameHint) {
+        var file = YsmBridge.modelFile(modelId).orElse(null);
+        if (file == null) {
             return new DeleteResult(false, null,
                 "该模型没有文件支撑（内置或仅驻留内存），relay 不删它");
         }
-        source = source.toAbsolutePath().normalize();
-        if (rootOfFile(source) == Root.UNKNOWN) {
-            return new DeleteResult(false, source,
-                "文件不在 relay 认得的 custom/auth 根内（" + source + "），拒绝删除");
+        var absolute = file.toAbsolutePath().normalize();
+        var removed = 0;
+        var target = absolute;
+
+        if (rootOfFile(absolute) != Root.UNKNOWN) {
+            // 直放容器：文件就在模型根里
+            try {
+                Files.delete(absolute);
+                removed++;
+            } catch (IOException failure) {
+                YsmRelay.LOGGER.warn("[ysm-relay] 删除模型文件失败 {}", absolute, failure);
+                return new DeleteResult(false, absolute,
+                    "删除失败：" + failure.getMessage() + "（文件可能正被 YSM 占用；可先重启服务端再删）");
+            }
+        } else if (isConvertedCacheObject(absolute, modelId)) {
+            // 导入后的缓存对象：删整个 objects/<modelId>/ 目录
+            var objectDir = absolute.getParent();
+            try {
+                deleteTree(objectDir);
+                removed++;
+            } catch (IOException failure) {
+                YsmRelay.LOGGER.warn("[ysm-relay] 删除模型缓存失败 {}", objectDir, failure);
+                return new DeleteResult(false, objectDir,
+                    "删除缓存失败：" + failure.getMessage() + "（可能正被 YSM 占用；可先重启服务端再删）");
+            }
+            target = objectDir;
+        } else {
+            return new DeleteResult(false, absolute,
+                "模型文件既不在 custom/auth 根内，也不是 YSM 的转换缓存（" + absolute + "），拒绝删除");
         }
-        try {
-            Files.delete(source);
-        } catch (IOException failure) {
-            YsmRelay.LOGGER.warn("[ysm-relay] 删除模型文件失败 {}", source, failure);
-            return new DeleteResult(false, source,
-                "删除失败：" + failure.getMessage() + "（文件可能正被 YSM 占用；可先重启服务端再删）");
-        }
+
+        // 源文件也要清掉，否则下一次重扫会把它重新导入回来。
+        removed += deleteSourcesByName(fileNameHint);
+
         reloadQuietly("删除模型 " + shortId(modelId));
-        return new DeleteResult(true, source, "已删除 " + source.getFileName());
+        return new DeleteResult(true, target, "已删除（清理了 " + removed + " 个文件/目录）");
+    }
+
+    /** 路径是不是 {@code cache/converted/<x>/objects/<modelId>/...} 这种缓存对象。 */
+    private static boolean isConvertedCacheObject(Path file, Hash256 modelId) {
+        var parent = file.getParent();
+        if (parent == null || !parent.getFileName().toString().equalsIgnoreCase(modelId.toString())) {
+            return false;
+        }
+        var objects = parent.getParent();
+        if (objects == null || !"objects".equals(objects.getFileName().toString())) {
+            return false;
+        }
+        var path = file.toAbsolutePath().normalize().toString().replace('\\', '/').toLowerCase(java.util.Locale.ROOT);
+        return path.contains("/cache/converted/");
+    }
+
+    /** 在 custom/auth 里按文件名找源文件并删除，返回删除数量。 */
+    private static int deleteSourcesByName(String fileNameHint) {
+        if (fileNameHint == null || fileNameHint.isBlank()) {
+            return 0;
+        }
+        var wanted = fileNameHint.toLowerCase(java.util.Locale.ROOT);
+        var deleted = 0;
+        for (var root : java.util.List.of(RelayPaths.uploadRoot(), RelayPaths.authRoot())) {
+            if (root == null || !Files.isDirectory(root)) {
+                continue;
+            }
+            try (var stream = Files.walk(root, 3)) {
+                for (var candidate : stream.filter(Files::isRegularFile).toList()) {
+                    var name = candidate.getFileName().toString().toLowerCase(java.util.Locale.ROOT);
+                    if (!name.equals(wanted)) {
+                        continue;
+                    }
+                    try {
+                        Files.delete(candidate);
+                        deleted++;
+                        YsmRelay.LOGGER.info("[ysm-relay] 已删除模型源文件 {}", candidate);
+                    } catch (IOException failure) {
+                        YsmRelay.LOGGER.warn("[ysm-relay] 删除源文件失败 {}", candidate, failure);
+                    }
+                }
+            } catch (IOException failure) {
+                YsmRelay.LOGGER.warn("[ysm-relay] 遍历模型根失败 {}", root, failure);
+            }
+        }
+        return deleted;
+    }
+
+    private static void deleteTree(Path directory) throws IOException {
+        if (!Files.exists(directory)) {
+            return;
+        }
+        try (var stream = Files.walk(directory)) {
+            for (var item : stream.sorted(java.util.Comparator.reverseOrder()).toList()) {
+                Files.deleteIfExists(item);
+            }
+        }
     }
 
     /** 触发一次目录重扫；失败只记日志，不抛给命令调用方。 */

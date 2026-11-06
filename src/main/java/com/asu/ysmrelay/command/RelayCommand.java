@@ -3,6 +3,9 @@ package com.asu.ysmrelay.command;
 import com.asu.ysmrelay.YsmRelay;
 import com.asu.ysmrelay.admin.AuthAdmin;
 import com.asu.ysmrelay.admin.ModelPlacement;
+import com.asu.ysmrelay.config.RelayConfig;
+import com.asu.ysmrelay.config.RelayPermissions;
+import com.asu.ysmrelay.upload.UploadRegistry;
 import com.asu.ysmrelay.ysm.YsmBridge;
 import com.elfmcys.ysm.model.domain.Hash256;
 import com.mojang.brigadier.Command;
@@ -17,11 +20,11 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraftforge.event.RegisterCommandsEvent;
@@ -48,6 +51,322 @@ public final class RelayCommand {
     @SubscribeEvent
     public static void onRegisterCommands(RegisterCommandsEvent event) {
         event.getDispatcher().register(build());
+        // 自助面：任何人都能用，只操作自己上传的模型，所以不加权限门槛。
+        event.getDispatcher().register(selfService());
+    }
+
+    /**
+     * 只有「真服主」能授予等级：控制台，或单人开 LAN 的房主。
+     *
+     * <p>刻意不认权限等级 4：op 也是 4，认了就等于 op 能给自己发 3 级。
+     * 命令方块会被挡在外面——它的命令源没有实体，但文本名不是 {@code Server}，
+     * 而是方块自己的名字（默认 {@code !}）。
+     */
+    private static boolean isRealOwnerSource(CommandSourceStack source) {
+        if (source.getEntity() instanceof ServerPlayer player) {
+            return RelayPermissions.isHost(player);
+        }
+        // 控制台/RCON 的命令源没有世界（level == null）；命令方块永远带着自己的世界，
+        // 光靠名字还能被改名的方块绕过，加上这一条才真的挡死。
+        return source.getEntity() == null
+            && source.getLevel() == null
+            && "Server".equals(source.getTextName());
+    }
+
+    private static int levelGrant(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        var target = EntityArgument.getPlayer(context, TARGETS);
+        var level = IntegerArgumentType.getInteger(context, "level");
+        var uuid = target.getUUID().toString().toLowerCase(Locale.ROOT);
+        var next = RelayConfig.levelGrants();
+        next.removeIf(entry -> entry.startsWith(uuid + ":"));
+        next.add(uuid + ":" + level);
+        RelayConfig.setLevelGrants(next);
+        context.getSource().sendSuccess(() -> Component.literal(
+            "[ysm-relay] 已授予 " + target.getGameProfile().getName() + " 等级 " + level), true);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int levelRevoke(CommandContext<CommandSourceStack> context) {
+        var uuid = StringArgumentType.getString(context, "uuid").trim().toLowerCase(Locale.ROOT);
+        var next = RelayConfig.levelGrants();
+        var removed = next.removeIf(entry -> entry.startsWith(uuid + ":"));
+        if (!removed) {
+            context.getSource().sendFailure(Component.literal("[ysm-relay] 没有这个玩家的等级授予"));
+            return 0;
+        }
+        RelayConfig.setLevelGrants(next);
+        context.getSource().sendSuccess(() -> Component.literal("[ysm-relay] 已撤销 " + uuid + " 的等级"), true);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int levelList(CommandContext<CommandSourceStack> context) {
+        var grants = RelayConfig.levelGrants();
+        if (grants.isEmpty()) {
+            context.getSource().sendSuccess(() -> Component.literal("[ysm-relay] 没有手动授予的等级"), false);
+            return Command.SINGLE_SUCCESS;
+        }
+        for (var entry : grants) {
+            context.getSource().sendSuccess(() -> Component.literal("  " + entry), false);
+        }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    /** 把玩家加进上传白名单。 */
+    private static int whitelistAdd(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        var target = EntityArgument.getPlayer(context, TARGETS);
+        var uuid = target.getUUID().toString().toLowerCase(Locale.ROOT);
+        var next = new LinkedHashSet<>(RelayConfig.uploadWhitelist());
+        next.add(uuid);
+        RelayConfig.setUploadWhitelist(next);
+        var name = target.getGameProfile().getName();
+        context.getSource().sendSuccess(() -> Component.literal(
+            "[ysm-relay] 已加入上传白名单：" + name + "（" + uuid + "）"), true);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int whitelistRemove(CommandContext<CommandSourceStack> context) {
+        var raw = StringArgumentType.getString(context, "uuid").trim().toLowerCase(Locale.ROOT);
+        var next = new LinkedHashSet<>(RelayConfig.uploadWhitelist());
+        if (!next.remove(raw)) {
+            context.getSource().sendFailure(Component.literal("[ysm-relay] 白名单里没有这个 UUID"));
+            return 0;
+        }
+        RelayConfig.setUploadWhitelist(next);
+        context.getSource().sendSuccess(() -> Component.literal("[ysm-relay] 已移出上传白名单 " + raw), true);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int whitelistList(CommandContext<CommandSourceStack> context) {
+        var list = RelayConfig.uploadWhitelist();
+        if (list.isEmpty()) {
+            context.getSource().sendSuccess(() -> Component.literal("[ysm-relay] 上传白名单为空"), false);
+            return Command.SINGLE_SUCCESS;
+        }
+        context.getSource().sendSuccess(() -> Component.literal("[ysm-relay] 上传白名单 " + list.size() + " 人："), false);
+        for (var uuid : list) {
+            context.getSource().sendSuccess(() -> Component.literal("  " + uuid), false);
+        }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    /** 打印各个模型目录与目录里的实际文件数，用来确认「上传到底落到哪」。 */
+    private static int printPaths(CommandContext<CommandSourceStack> context) {
+        var source = context.getSource();
+        try {
+            var upload = com.asu.ysmrelay.upload.RelayPaths.uploadRoot();
+            var auth = com.asu.ysmrelay.upload.RelayPaths.authRoot();
+            var staging = com.asu.ysmrelay.upload.RelayPaths.stagingRoot();
+            var pending = com.asu.ysmrelay.upload.RelayPaths.pendingRoot();
+            source.sendSuccess(() -> Component.literal("[ysm-relay] 上传根: " + upload), false);
+            source.sendSuccess(() -> Component.literal("[ysm-relay] 授权根: " + auth), false);
+            source.sendSuccess(() -> Component.literal("[ysm-relay] 暂存: " + staging), false);
+            source.sendSuccess(() -> Component.literal("[ysm-relay] 待审: " + pending), false);
+            source.sendSuccess(() -> Component.literal("[ysm-relay] targetRoot = "
+                + (RelayConfig.targetAuthRoot() ? "auth" : "custom")), false);
+            source.sendSuccess(() -> Component.literal("[ysm-relay] 目录里 .mxc 数量: "
+                + countFiles(upload, ".mxc") + "（授权根 " + countFiles(auth, ".mxc") + "）"), false);
+            source.sendSuccess(() -> Component.literal("[ysm-relay] 目录里所有文件: " + countFiles(upload, "")),
+                false);
+            source.sendSuccess(() -> Component.literal("[ysm-relay] 目录模型数（YSM 目录）: "
+                + YsmBridge.serverModelIds().size()), false);
+        } catch (RuntimeException failure) {
+            source.sendFailure(Component.literal("[ysm-relay] 读取路径失败：" + failure.getMessage()));
+        }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static long countFiles(java.nio.file.Path root, String extension) {
+        if (root == null || !java.nio.file.Files.isDirectory(root)) {
+            return 0L;
+        }
+        try (var stream = java.nio.file.Files.walk(root, 4)) {
+            return stream.filter(java.nio.file.Files::isRegularFile)
+                .filter(path -> extension.isEmpty()
+                    || path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(extension))
+                .count();
+        } catch (java.io.IOException failure) {
+            return -1L;
+        }
+    }
+
+    /** 列出待审条目。 */
+    private static int pendingList(CommandContext<CommandSourceStack> context) {
+        var entries = com.asu.ysmrelay.upload.PendingQueue.get().list();
+        if (entries.isEmpty()) {
+            context.getSource().sendSuccess(() -> Component.literal("[ysm-relay] 待审队列是空的"), false);
+            return Command.SINGLE_SUCCESS;
+        }
+        context.getSource().sendSuccess(() -> Component.literal(
+            "[ysm-relay] 待审 " + entries.size() + " 条："), false);
+        for (var entry : entries) {
+            var dir = com.asu.ysmrelay.upload.PendingQueue.directoryOf(entry.reviewId());
+            var path = dir.resolve(entry.fileName()).toAbsolutePath();
+            var shortId = entry.modelId().substring(0, 12);
+            var sizeMiB = entry.size() / (1024.0 * 1024.0);
+            context.getSource().sendSuccess(() -> Component.literal(
+                "  " + entry.reviewId() + "  " + entry.uploaderName() + "  " + entry.fileName()
+                    + String.format(Locale.ROOT, "  %.2f MiB  ", sizeMiB) + shortId), false);
+        }
+        context.getSource().sendSuccess(() -> Component.literal(
+            "[ysm-relay] 批准 /ysmrelay approve <review>，拒绝 /ysmrelay reject <review>"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int approveReview(CommandContext<CommandSourceStack> context) {
+        var reviewId = StringArgumentType.getString(context, "review");
+        var message = com.asu.ysmrelay.upload.UploadService.instance().approve(reviewId);
+        context.getSource().sendSuccess(() -> Component.literal("[ysm-relay] " + message), true);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int rejectReview(CommandContext<CommandSourceStack> context) {
+        var reviewId = StringArgumentType.getString(context, "review");
+        var message = com.asu.ysmrelay.upload.UploadService.instance().reject(reviewId);
+        context.getSource().sendSuccess(() -> Component.literal("[ysm-relay] " + message), true);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    /** 拉黑一个在线玩家：之后不再接收他上传的模型。 */
+    private static int blockUploaderAdd(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        var target = EntityArgument.getPlayer(context, TARGETS);
+        var uuid = target.getUUID().toString().toLowerCase(Locale.ROOT);
+        var next = new LinkedHashSet<>(RelayConfig.blockedUploaders());
+        next.add(uuid);
+        RelayConfig.setBlockedUploaders(next);
+        var name = target.getGameProfile().getName();
+        context.getSource().sendSuccess(() -> Component.literal(
+            "[ysm-relay] 已拉黑 " + name + "（" + uuid + "），之后不再接收他的上传；已入库的模型保持不动"), true);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    /** 按 UUID 解除拉黑（玩家不在线也能解）。 */
+    private static int blockUploaderRemove(CommandContext<CommandSourceStack> context) {
+        var raw = StringArgumentType.getString(context, "uuid").trim().toLowerCase(Locale.ROOT);
+        var next = new LinkedHashSet<>(RelayConfig.blockedUploaders());
+        if (!next.remove(raw)) {
+            context.getSource().sendFailure(Component.literal("[ysm-relay] 名单里没有这个 UUID"));
+            return 0;
+        }
+        RelayConfig.setBlockedUploaders(next);
+        context.getSource().sendSuccess(() -> Component.literal("[ysm-relay] 已解除拉黑 " + raw), true);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    /** 列出被拉黑的上传者。 */
+    private static int blockUploaderList(CommandContext<CommandSourceStack> context) {
+        var blocked = RelayConfig.blockedUploaders();
+        if (blocked.isEmpty()) {
+            context.getSource().sendSuccess(() -> Component.literal("[ysm-relay] 拉黑名单为空"), false);
+            return Command.SINGLE_SUCCESS;
+        }
+        context.getSource().sendSuccess(() -> Component.literal("[ysm-relay] 已拉黑 " + blocked.size() + " 人："), false);
+        for (var uuid : blocked) {
+            context.getSource().sendSuccess(() -> Component.literal("  " + uuid), false);
+        }
+        return Command.SINGLE_SUCCESS;
+    }
+
+    /**
+     * {@code /relayme}：玩家自助面。
+     *
+     * <p>刻意不挂权限要求：命令本身只读/只删「调用者自己上传的」那几个模型，
+     * 服务端在 {@link #deleteOwn} 里用台账的 uploaderId 复核，越权一律拒绝。
+     */
+    private static LiteralArgumentBuilder<CommandSourceStack> selfService() {
+        var root = Commands.literal("relayme");
+        root.then(Commands.literal("list").executes(RelayCommand::myUploads));
+        root.then(Commands.literal("delete")
+            .then(Commands.argument(MODEL, StringArgumentType.word())
+                .then(Commands.literal("confirm").executes(RelayCommand::deleteOwn))));
+        // 撤回自己还没被审批的内容。
+        root.then(Commands.literal("cancel")
+            .then(Commands.argument("review", StringArgumentType.word()).executes(RelayCommand::cancelOwn)));
+        return root;
+    }
+
+    /** 列出自己上传过的模型。 */
+    private static int myUploads(CommandContext<CommandSourceStack> context) {
+        var source = context.getSource();
+        var player = source.getPlayer();
+        if (player == null) {
+            source.sendFailure(Component.literal("[ysm-relay] 这条命令只能由玩家执行"));
+            return 0;
+        }
+        var mine = player.getUUID().toString().toLowerCase(Locale.ROOT);
+        var entries = UploadRegistry.get().all().stream()
+            .filter(entry -> entry.uploaderId().equalsIgnoreCase(mine))
+            .toList();
+        if (entries.isEmpty()) {
+            source.sendSuccess(() -> Component.literal("[ysm-relay] 你还没有上传过模型"), false);
+            return Command.SINGLE_SUCCESS;
+        }
+        source.sendSuccess(() -> Component.literal("[ysm-relay] 你上传过 " + entries.size() + " 个模型："), false);
+        var limit = Math.min(entries.size(), 12);
+        for (var index = 0; index < limit; index++) {
+            var entry = entries.get(index);
+            var shortId = entry.modelId().substring(0, 12);
+            var sizeMiB = entry.size() / (1024.0 * 1024.0);
+            source.sendSuccess(() -> Component.literal("  " + shortId + "  " + entry.fileName()
+                + String.format(Locale.ROOT, "  %.2f MiB", sizeMiB)), false);
+        }
+        if (entries.size() > limit) {
+            source.sendSuccess(() -> Component.literal("  …还有 " + (entries.size() - limit) + " 条未显示"), false);
+        }
+        source.sendSuccess(() -> Component.literal("[ysm-relay] 删除用 /relayme delete <哈希前缀> confirm"), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    /** 撤回自己上传、还没被审批的内容。 */
+    private static int cancelOwn(CommandContext<CommandSourceStack> context) {
+        var source = context.getSource();
+        var player = source.getPlayer();
+        if (player == null) {
+            source.sendFailure(Component.literal("[ysm-relay] 这条命令只能由玩家执行"));
+            return 0;
+        }
+        var reviewId = StringArgumentType.getString(context, "review").trim().toLowerCase(Locale.ROOT);
+        var message = com.asu.ysmrelay.upload.UploadService.instance().withdraw(reviewId, player.getUUID());
+        source.sendSuccess(() -> Component.literal("[ysm-relay] " + message), false);
+        return Command.SINGLE_SUCCESS;
+    }
+
+    /** 删除自己上传的模型。服务端按台账复核归属，删完不进制止名单。 */
+    private static int deleteOwn(CommandContext<CommandSourceStack> context) {
+        var source = context.getSource();
+        var player = source.getPlayer();
+        if (player == null) {
+            source.sendFailure(Component.literal("[ysm-relay] 这条命令只能由玩家执行"));
+            return 0;
+        }
+        var resolved = resolveModel(StringArgumentType.getString(context, MODEL));
+        if (resolved.error() != null) {
+            source.sendFailure(Component.literal("[ysm-relay] " + resolved.error()));
+            return 0;
+        }
+        var modelId = resolved.modelId();
+        var entry = UploadRegistry.get().find(modelId).orElse(null);
+        if (entry == null) {
+            source.sendFailure(Component.literal("[ysm-relay] 服务端没有你的上传记录：可能是服主手动放的模型"));
+            return 0;
+        }
+        if (!RelayPermissions.canDeleteOwn(player, entry.uploaderId())) {
+            source.sendFailure(Component.literal("[ysm-relay] 这个模型不是你上传的，不能删"));
+            return 0;
+        }
+        var admin = AuthAdmin.get();
+        var server = source.getServer();
+        admin.revokeEverywhere(server, modelId);
+        admin.remove(modelId);
+        var result = ModelPlacement.delete(modelId, entry.fileName());
+        if (!result.deleted()) {
+            source.sendFailure(Component.literal("[ysm-relay] 删除失败：" + result.message()));
+            return 0;
+        }
+        UploadRegistry.get().remove(modelId);
+        // 不写进「禁止上传」名单：玩家自己删的，应该还能再传回来。
+        ModelPlacement.reloadQuietly("player deleted own upload");
+        source.sendSuccess(() -> Component.literal("[ysm-relay] 已删除：" + result.message()), true);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> build() {
@@ -94,6 +413,60 @@ public final class RelayCommand {
             .executes(RelayCommand::block)));
         root.then(Commands.literal("unblock").then(Commands.argument(MODEL, StringArgumentType.word())
             .executes(RelayCommand::unblock)));
+
+        var blockUploader = Commands.literal("blockuploader")
+            .requires(source -> !(source.getEntity() instanceof ServerPlayer player)
+                || RelayPermissions.canBlockUploader(player));
+        blockUploader.then(Commands.literal("add")
+            .then(Commands.argument(TARGETS, EntityArgument.player()).executes(RelayCommand::blockUploaderAdd)));
+        blockUploader.then(Commands.literal("remove")
+            .then(Commands.argument("uuid", StringArgumentType.word()).executes(RelayCommand::blockUploaderRemove)));
+        blockUploader.then(Commands.literal("list").executes(RelayCommand::blockUploaderList));
+        root.then(blockUploader);
+
+        // 上传白名单：名单内玩家免审核、免个人配额。
+        var whitelist = Commands.literal("whitelist")
+            .requires(source -> !(source.getEntity() instanceof ServerPlayer player)
+                || RelayPermissions.canBlockUploader(player));
+        whitelist.then(Commands.literal("add")
+            .then(Commands.argument(TARGETS, EntityArgument.player()).executes(RelayCommand::whitelistAdd)));
+        whitelist.then(Commands.literal("remove")
+            .then(Commands.argument("uuid", StringArgumentType.word()).executes(RelayCommand::whitelistRemove)));
+        whitelist.then(Commands.literal("list").executes(RelayCommand::whitelistList));
+        root.then(whitelist);
+
+        // 等级授予：只有服主能加/撤。
+        var level = Commands.literal("level")
+            .requires(RelayCommand::isRealOwnerSource);
+        level.then(Commands.literal("grant")
+            .then(Commands.argument(TARGETS, EntityArgument.player())
+                .then(Commands.argument("level", IntegerArgumentType.integer(1, 3))
+                    .executes(RelayCommand::levelGrant))));
+        level.then(Commands.literal("revoke")
+            .then(Commands.argument("uuid", StringArgumentType.word()).executes(RelayCommand::levelRevoke)));
+        level.then(Commands.literal("list").executes(RelayCommand::levelList));
+        root.then(level);
+
+        // 审批面：只有服主或权限组成员能看/能批。
+        var pending = Commands.literal("pending")
+            .requires(source -> !(source.getEntity() instanceof ServerPlayer player)
+                || RelayPermissions.canApprove(player))
+            .executes(RelayCommand::pendingList);
+        root.then(pending);
+
+        var approve = Commands.literal("approve")
+            .requires(source -> !(source.getEntity() instanceof ServerPlayer player)
+                || RelayPermissions.canApprove(player))
+            .then(Commands.argument("review", StringArgumentType.word()).executes(RelayCommand::approveReview));
+        root.then(approve);
+
+        var reject = Commands.literal("reject")
+            .requires(source -> !(source.getEntity() instanceof ServerPlayer player)
+                || RelayPermissions.canApprove(player))
+            .then(Commands.argument("review", StringArgumentType.word()).executes(RelayCommand::rejectReview));
+        root.then(reject);
+
+        root.then(Commands.literal("paths").executes(RelayCommand::printPaths));
 
         root.then(Commands.literal("refresh").executes(RelayCommand::refreshAll)
             .then(Commands.argument(TARGETS, EntityArgument.player()).executes(RelayCommand::refreshOne)));
@@ -330,7 +703,8 @@ public final class RelayCommand {
         admin.revokeEverywhere(server, modelId);
         admin.remove(modelId);
 
-        var result = ModelPlacement.delete(modelId);
+        var result = ModelPlacement.delete(modelId,
+            UploadRegistry.get().find(modelId).map(UploadRegistry.Entry::fileName).orElse(null));
         if (!result.deleted()) {
             source.sendFailure(Component.literal("[ysm-relay] " + result.message()));
             return 0;
@@ -478,8 +852,4 @@ public final class RelayCommand {
         return EntityArgument.getPlayers(context, TARGETS);
     }
 
-    /** 供其它模块使用的只读视图：某个模型当前被列进哪些玩家的名单。 */
-    public static Set<UUID> listedPlayers(Hash256 modelId) {
-        return AuthAdmin.get().ruleOf(modelId).players();
-    }
 }

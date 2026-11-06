@@ -2,6 +2,7 @@ package com.asu.ysmrelay.upload;
 
 import com.asu.ysmrelay.admin.AuthAdmin;
 import com.asu.ysmrelay.config.RelayConfig;
+import com.asu.ysmrelay.config.RelayPermissions;
 import com.asu.ysmrelay.net.RelayNetwork;
 import com.asu.ysmrelay.net.msg.ProbeReply;
 import com.asu.ysmrelay.net.msg.UploadChunk;
@@ -10,10 +11,6 @@ import com.asu.ysmrelay.net.msg.UploadProgress;
 import com.asu.ysmrelay.net.msg.UploadResult;
 import com.asu.ysmrelay.ysm.YsmBridge;
 
-import com.elfmcys.ysm.format.parser.CapturedModel;
-import com.elfmcys.ysm.format.parser.DefaultAnimationFilter;
-import com.elfmcys.ysm.format.parser.RawCompileResult;
-import com.elfmcys.ysm.model.catalog.RawModelImporter;
 import com.elfmcys.ysm.model.domain.Hash256;
 
 import net.minecraft.server.level.ServerPlayer;
@@ -43,8 +40,9 @@ import java.util.concurrent.atomic.AtomicLong;
  *   <li><b>探测</b>（{@link #onProbe}）：先判重、判上限、判权限。这一步不接收任何数据字节，
  *       所以「重复上传」和「超大文件」都只花一个包的成本。</li>
  *   <li><b>接收</b>（{@link #onChunk}）：直接追加写 staging 文件，不在内存里拼。</li>
- *   <li><b>导入</b>（{@link #importAsync}）：走 YSM 自己的 {@link RawModelImporter}，先
- *       {@code capture} 拿到模型标识并比对声明值，再 {@code convert} 出正式的 {@code .mxc}。</li>
+ *   <li><b>导入</b>（{@link #importAsync}）：把收到的文件原样放进模型目录，由 YSM 自己的
+ *       导入管线转码与建索引。成品容器（YSGP2）例外：它会被当作「直放容器」，必须先验收
+ *       内嵌预览，否则 YSM 会拒收。</li>
  * </ol>
  *
  * <p>导入完成后的「广播给所有玩家」不在这里做：YSM 的 {@code ServerModelService} 自己订阅了
@@ -127,18 +125,40 @@ public final class UploadService {
     public void onProbe(ServerPlayer player, UploadProbe probe) {
         sweepStagingOnce();
 
+        // 最高优先级：「拒绝一切上传」压过其它所有开关。
+        if (RelayConfig.rejectAllUploads()) {
+            reply(player, ProbeReply.denied(UploadResult.REJECTED_POLICY, "本服已关闭模型上传"));
+            return;
+        }
+        // 拉黑名单：只拒收这些人之后上传的模型，已经入库的不动。
+        var blocked = RelayConfig.blockedUploaders();
+        if (!blocked.isEmpty() && blocked.contains(RelayPermissions.uuidOf(player))) {
+            reply(player, ProbeReply.denied(UploadResult.REJECTED_POLICY, "你已被本服禁止上传模型"));
+            return;
+        }
         if (!RelayConfig.ALLOW_PLAYER_UPLOAD.get()) {
             reply(player, ProbeReply.denied(UploadResult.REJECTED_POLICY, "本服没有开启玩家模型上传"));
             return;
         }
+        // 白名单玩家：免审核、免个人配额、免权限等级；资源类守卫（总闸、拉黑、体积、总量）照样成立。
+        var whitelisted = RelayPermissions.isUploadWhitelisted(player);
         var requiredLevel = RelayConfig.UPLOAD_PERMISSION_LEVEL.get();
-        if (requiredLevel > 0 && !player.hasPermissions(requiredLevel)) {
+        if (!whitelisted && requiredLevel > 0 && !player.hasPermissions(requiredLevel)) {
             reply(player, ProbeReply.denied(UploadResult.REJECTED_POLICY, "你没有上传模型的权限"));
             return;
         }
         if (probe.size <= 0L) {
             reply(player, ProbeReply.denied(UploadResult.REJECTED_IDENTITY, "文件为空"));
             return;
+        }
+        // 全自动模式下，超过「自动同意上限」的文件直接拒收，不浪费带宽。
+        if (RelayConfig.uploadMode().equals("full")) {
+            var autoCap = RelayConfig.autoApproveMaxBytes();
+            if (autoCap > 0L && probe.size > autoCap) {
+                reply(player, ProbeReply.denied(UploadResult.REJECTED_QUOTA,
+                    "超过自动模式上限 " + mib(autoCap) + "，本服当前是全自动模式，请改用审批模式或让服主调整"));
+                return;
+            }
         }
         var limit = RelayConfig.maxModelBytes();
         if (limit > 0L && probe.size > limit) {
@@ -149,7 +169,7 @@ public final class UploadService {
 
         // 配额按 UploadRegistry 里记录的上传量算，不遍历磁盘：服主手动放进目录的模型不占玩家配额。
         var perPlayer = RelayConfig.maxBytesPerPlayer();
-        if (perPlayer > 0L) {
+        if (!whitelisted && perPlayer > 0L) {
             var used = UploadRegistry.get().bytesBy(player.getUUID().toString());
             if (used + probe.size > perPlayer) {
                 reply(player, ProbeReply.denied(UploadResult.REJECTED_QUOTA, "超出个人配额：已用 " + mib(used)
@@ -219,6 +239,18 @@ public final class UploadService {
                 "待审核的模型已经攒到上限 " + pendingMax + " 个，请等服主处理"));
             return;
         }
+        // 审批模式下每人的待审上限：超过就不许再传，直到服主处理掉前面那几个。
+        if (!whitelisted) {
+            var perPlayerPending = RelayConfig.maxPendingPerPlayer();
+            if (perPlayerPending > 0) {
+                var mine = PendingQueue.get().countByUploader(RelayPermissions.uuidOf(player));
+                if (mine >= perPlayerPending) {
+                    reply(player, ProbeReply.denied(UploadResult.REJECTED_QUEUE_FULL,
+                        "你已有 " + mine + " 个模型在等待审核（上限 " + perPlayerPending + " 个），请等服主处理"));
+                    return;
+                }
+            }
+        }
         // 磁盘剩余下限：必须在创建任何暂存文件之前判 —— 先 open() 再判的话磁盘上会先多一个空文件，
         // 而且「拒收且暂存目录零文件」这条验收就做不到了。
         var freeFloor = RelayConfig.minFreeDiskBytes();
@@ -273,7 +305,7 @@ public final class UploadService {
             byPlayer.put(player.getUUID(), upload);
             byTransfer.put(transferId, upload);
             // 三参版把服主配的上行速率一并下发；客户端据此让出，服务端只做超速观测。
-            reply(player, ProbeReply.allowed(transferId, RelayConfig.CHUNK_BYTES.get(),
+            reply(player, ProbeReply.allowed(transferId, RelayConfig.safeChunkBytes(),
                 RelayConfig.maxUploadBytesPerSecond()));
         }
     }
@@ -285,6 +317,11 @@ public final class UploadService {
     public void onChunk(ServerPlayer player, UploadChunk chunk) {
         var upload = byTransfer.get(chunk.transferId);
         if (upload == null || !upload.playerId.equals(player.getUUID())) {
+            return;
+        }
+        // 首片嗅探魔数：不是 YSM 容器、压缩包或 7z 的话当场中止，省掉整份带宽。
+        if (chunk.seq == 0 && chunk.data != null && !looksLikeModelSource(chunk.data)) {
+            abort(player, upload, UploadResult.REJECTED_IDENTITY, "文件内容不是 YSM 模型或支持的压缩包");
             return;
         }
         meterRate(upload, chunk.data == null ? 0 : chunk.data.length);
@@ -312,6 +349,16 @@ public final class UploadService {
         conversions().submit(() -> importAsync(player, upload));
     }
 
+    /** 客户端主动放弃这次传输。释放槽位、删掉暂存文件，并回一条 CANCELLED。 */
+    public void onAbort(ServerPlayer player, long transferId) {
+        var upload = byTransfer.get(transferId);
+        if (upload == null || !upload.playerId.equals(player.getUUID())) {
+            return;
+        }
+        abort(player, upload, UploadResult.CANCELLED, "上传已取消");
+        LOGGER.info("[ysm-relay] 玩家 {} 取消了上传 {}", player.getGameProfile().getName(), transferId);
+    }
+
     public void onDisconnect(ServerPlayer player) {
         var upload = byPlayer.remove(player.getUUID());
         if (upload == null) {
@@ -321,6 +368,32 @@ public final class UploadService {
         rateWindows.remove(upload.transferId);
         upload.discard();
         LOGGER.info("[ysm-relay] 玩家 {} 断线，放弃上传 {}", player.getGameProfile().getName(), upload.transferId);
+    }
+
+    /**
+     * 首片魔数判定。
+     *
+     * <p>接受四种开头：当前容器 / 旧版 V3 / 旧版 raw {@code YSGP} / zip / 7z。
+     * 判断只看前 8 个字节，不做完整解析——完整解析在导入阶段做，这里只挡明显的垃圾文件。
+     */
+    private static boolean looksLikeModelSource(byte[] head) {
+        return startsWith(head, new byte[] {(byte) 0xEF, (byte) 0xBB, (byte) 0xBF, 'Y', 'S', 'G', 'P'})
+            || startsWith(head, new byte[] {'Y', 'S', 'G', 'P'})
+            || startsWith(head, new byte[] {'P', 'K', 3, 4})
+            || startsWith(head, new byte[] {'P', 'K', 5, 6})
+            || startsWith(head, new byte[] {0x37, 0x7A, (byte) 0xBC, (byte) 0xAF});
+    }
+
+    private static boolean startsWith(byte[] data, byte[] prefix) {
+        if (data.length < prefix.length) {
+            return false;
+        }
+        for (var index = 0; index < prefix.length; index++) {
+            if (data[index] != prefix[index]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void abort(ServerPlayer player, ServerUpload upload, int status, String message) {
@@ -340,32 +413,47 @@ public final class UploadService {
             var target = RelayConfig.targetAuthRoot() ? RelayPaths.authRoot() : RelayPaths.uploadRoot();
             Files.createDirectories(target);
             var declared = new Hash256(upload.declaredModelId);
-            var importer = new RawModelImporter(DefaultAnimationFilter.keepAll());
 
-            RawCompileResult compiled;
-            try (CapturedModel captured = importer.capture(upload.stagingFile)) {
-                if (!captured.modelId().equals(declared)) {
-                    complete(player, upload, UploadResult.REJECTED_IDENTITY, null, "",
-                        "内容与声明的模型标识不符，可能文件已损坏或被改动");
-                    return;
-                }
-                compiled = importer.convert(captured, target);
-            }
-
-            if (!compiled.modelHash().equals(declared)) {
-                deleteQuietly(compiled.stagedContainer());
-                complete(player, upload, UploadResult.REJECTED_IDENTITY, null, "", "编译后的模型标识与声明不一致");
+            // 判重：catalog 里有、或刚写完还没重扫（pendingCommits），都算已有。
+            if (YsmBridge.serverModelIds().contains(declared) || pendingCommits.containsKey(declared)) {
+                complete(player, upload, UploadResult.ALREADY_AVAILABLE, declared.bytes(), "",
+                    "服务端已有相同内容的模型");
                 return;
             }
 
-            // 判重要做三处，缺一处就会在磁盘上留死文件：
-            //   1) 探测阶段查 catalog（这时还一个数据字节都没传）
-            //   2) 这里再查 catalog（接住「别人刚 reload 完」的窗口）
-            //   3) 查 pendingCommits（接住「我们刚写完，目录还没重扫」的窗口）
-            // 只做 1+2 会漏掉 3：同一份模型在 500ms 合并窗口内被传两次时两次都写文件，
-            // YSM 的 CatalogReconciler.selectFirstValid 用 putIfAbsent 去重，
-            // 输的那份只产生一条扫描错误，文件永远不被引用、也不会被删。
-            submit(player, upload, declared, compiled);
+            var format = ModelIdentity.detect(upload.stagingFile);
+
+            // 当前格式容器（YSGP2）：YSM 把它当「成品直放容器」，准入要求内嵌预览。
+            // 没有预览的话，放进 custom 也只会在重扫时被拒（日志里是
+            // Direct model container has no embedded preview），所以这里先自己验。
+            if (format == ModelIdentity.Format.CURRENT_CONTAINER) {
+                var container = com.elfmcys.ysm.model.storage.ManagedContainer.openDirect(upload.stagingFile,
+                    com.elfmcys.ysm.model.catalog.source.CatalogLocation.DEFAULT);
+                try {
+                    if (!container.modelId().equals(declared)) {
+                        complete(player, upload, UploadResult.REJECTED_IDENTITY, null, "",
+                            "容器声明的模型标识与上传声明不符");
+                        return;
+                    }
+                    try {
+                        com.elfmcys.ysm.model.catalog.content.DirectContainerAdmission
+                            .requireEmbeddedPreview(container);
+                    } catch (IOException noPreview) {
+                        complete(player, upload, UploadResult.REJECTED_IDENTITY, null, "",
+                            "这个容器没有内嵌预览，YSM 不会把它当作成品模型接收");
+                        return;
+                    }
+                } finally {
+                    container.representation().close();
+                }
+                submit(player, upload, declared, upload.stagingFile, ".mxc");
+                return;
+            }
+
+            // 旧版容器与压缩包：不要自己转码。YSM 自己会把 custom 下的 .ysm/.zip 当作
+            // 「模型源」导入并建立索引，这条路不要求内嵌预览；而我们事先转码出来的成品
+            // 会被当成直放容器，一旦缺预览就被拒。原样投放即可。
+            submit(player, upload, declared, upload.stagingFile, extensionOf(upload));
         } catch (Throwable failure) {
             LOGGER.warn("[ysm-relay] 导入上传内容失败 transfer={}", upload.transferId, failure);
             complete(player, upload, UploadResult.FAILED_CONVERSION, null, "", String.valueOf(failure.getMessage()));
@@ -374,44 +462,196 @@ public final class UploadService {
         }
     }
 
-    /**
-     * <b>单一提交出口 —— W3 唯一要替换的方法体。</b>
-     *
-     * <p>约定（PLAN §10 J3）：探测侧的守卫全在 {@link #onProbe}，提交侧的分叉只在这里。
-     * 两个模块各改一段，{@code UploadService} 的写入者始终只有一个。
-     *
-     * <p>W3 要在这里做的是：读 {@code RelayConfig.autoApprove()} 与 {@code autoApproveMaxBytes()}，
-     * <ul>
-     *   <li><b>免审</b>（autoApprove 且声明体积不超门槛）→ 调 {@link #commit}，与现在完全一致；</li>
-     *   <li><b>要审</b> → 把 {@code compiled.stagedContainer()} 迁进 {@code relay-pending/<reviewId>/}、
-     *       写进 {@code PendingIndex}（{@link PendingIndex#install}）、回
-     *       {@code PENDING_REVIEW}，<b>不调 {@link #commit}</b>。</li>
-     * </ul>
-     *
-     * <p>现状（W2 交付的骨架）= 无条件直接提交，等价于「永远免审」。这不是占位符糊弄，
-     * 是为了让 W2 合入时上传通道的行为与合入前完全一致，不引入行为变化。
-     */
-    void submit(ServerPlayer player, ServerUpload upload, Hash256 modelId, RawCompileResult compiled) {
-        commit(player, upload, modelId, compiled);
+    /** 保留原始扩展名，YSM 的发现逻辑按扩展名决定走哪条导入路径。 */
+    private static String extensionOf(ServerUpload upload) {
+        var name = upload.originalName == null ? "" : upload.originalName.toLowerCase(Locale.ROOT);
+        for (var allowed : ALLOWED_EXTENSIONS) {
+            // allowed 自带宽点（".zip"），这里再拼一个点会变成 "..zip"，永远匹配不上。
+            if (name.endsWith(allowed)) {
+                return allowed;
+            }
+        }
+        return ".ysm";
     }
 
-    /** 真正落账：判重、记台账、触发重扫、给上传者补授权、回执。W3 的免审分支也走这里。 */
-    private void commit(ServerPlayer player, ServerUpload upload, Hash256 declared, RawCompileResult compiled) {
-        if (YsmBridge.serverModelIds().contains(declared) || pendingCommits.containsKey(declared)) {
-            deleteQuietly(compiled.stagedContainer());
-            complete(player, upload, UploadResult.ALREADY_AVAILABLE, declared.bytes(), "",
-                "服务端已有相同内容的模型");
+    /**
+     * 提交侧的唯一出口：决定这份内容直接进模型目录，还是先进待审队列。
+     *
+     * <p>判定顺序：白名单永远免审；否则看模式 —— {@code review} 全部待审，
+     * {@code auto} / {@code full} 在 {@code autoApproveMaxBytes} 以内免审。
+     * {@code full} 档超上限的请求在探测阶段就被拒绝了，走不到这里。
+     *
+     * <p>落盘时保留玩家原始文件名（重名加序号），因此 YSM 列表里显示的是正常名字而不是
+     * 一串模型标识。文件名只做最小清理：去路径分隔符、非法字符与控制字符。
+     */
+    void submit(ServerPlayer player, ServerUpload upload, Hash256 modelId, java.nio.file.Path source,
+        String extension) {
+        var cap = RelayConfig.autoApproveMaxBytes();
+        var mode = RelayConfig.uploadMode();
+        // 白名单永远免审；否则看模式：review 全待审，auto/full 在上限内免审。
+        // （full 模式下超上限的已经在探测阶段被拒了，走不到这里。）
+        var auto = RelayPermissions.isUploadWhitelisted(player)
+            || (!mode.equals("review") && (cap <= 0L || upload.expectedSize <= cap));
+        if (auto) {
+            var destination = RelayConfig.targetAuthRoot() ? RelayPaths.authRoot() : RelayPaths.uploadRoot();
+            try {
+                Files.createDirectories(destination);
+                var landed = land(source, destination, safeName(upload.originalName, modelId, extension));
+                pendingCommits.put(modelId, landed);
+                requestReload();
+                UploadRegistry.get().record(modelId, player, upload.originalName, upload.expectedSize);
+                grantToUploader(player, modelId);
+                long size = -1L;
+                try {
+                    size = Files.size(landed);
+                } catch (IOException ignored) {
+                    // 统计不到不影响结果
+                }
+                complete(player, upload, UploadResult.COMMITTED, modelId.bytes(),
+                    landed.getFileName().toString(), "");
+                LOGGER.info("[ysm-relay] 玩家 {} 上传模型成功 id={} path={} size={}",
+                    player.getGameProfile().getName(), modelId, landed, size);
+            } catch (IOException failure) {
+                LOGGER.warn("[ysm-relay] 模型落盘失败 transfer={}", upload.transferId, failure);
+                complete(player, upload, UploadResult.FAILED_CONVERSION, null, "", "服务端无法写入模型目录");
+            }
             return;
         }
-        pendingCommits.put(declared, compiled.stagedContainer());
+        // 审批模式：内容先进待审目录，服主决定之后才进 catalog。
+        try {
+            var reviewId = UUID.randomUUID().toString().substring(0, 8);
+            var directory = PendingQueue.directoryOf(reviewId);
+            Files.createDirectories(directory);
+            var target = land(source, directory, safeName(upload.originalName, modelId, extension));
+            var hash = modelId.toString();
+            PendingQueue.get().add(new PendingQueue.Entry(reviewId, hash, player.getUUID().toString(),
+                player.getGameProfile().getName(), upload.originalName, upload.expectedSize,
+                reviewId + "/" + target.getFileName(), System.currentTimeMillis()));
+            complete(player, upload, UploadResult.PENDING_REVIEW, modelId.bytes(), reviewId,
+                "已收下，等待服主审核");
+            LOGGER.info("[ysm-relay] {} 的上传进入待审队列 review={} id={}",
+                player.getGameProfile().getName(), reviewId, hash);
+        } catch (IOException failure) {
+            LOGGER.warn("[ysm-relay] 待审落盘失败 review transfer={}", upload.transferId, failure);
+            complete(player, upload, UploadResult.FAILED_CONVERSION, null, "", "服务端无法写入待审目录");
+        }
+    }
 
-        requestReload();
-        UploadRegistry.get().record(declared, player, upload.originalName, upload.expectedSize);
-        grantToUploader(player, declared);
-        complete(player, upload, UploadResult.COMMITTED, declared.bytes(),
-            compiled.stagedContainer().getFileName().toString(), "");
-        LOGGER.info("[ysm-relay] 玩家 {} 上传模型成功 id={} file={}",
-            player.getGameProfile().getName(), declared, compiled.stagedContainer().getFileName());
+    /**
+     * 模式切成自动/全自动后，把队列里已经存在的条目按新规则处理一遍。
+     *
+     * <p>不处理的话，切档只影响之后的新上传，队列里那批会一直躺着——这正是玩家看到的
+     * 「切了自动模式，之前传的还得手动批」。
+     *
+     * @return 处理结果的简短描述
+     */
+    public String drainPending(String mode) {
+        var cap = RelayConfig.autoApproveMaxBytes();
+        var approved = 0;
+        var rejected = 0;
+        var kept = 0;
+        for (var entry : PendingQueue.get().list()) {
+            var underCap = cap <= 0L || entry.size() <= cap;
+            if (underCap) {
+                approve(entry.reviewId());
+                approved++;
+            } else if (mode.equals("full")) {
+                reject(entry.reviewId());
+                rejected++;
+            } else {
+                // 自动同意档：超上限的继续等人批
+                kept++;
+            }
+        }
+        var summary = "[ysm-relay] 切到 " + mode + " 档，队列处理：批准 " + approved
+            + "，拒绝 " + rejected + "，仍需人工 " + kept;
+        LOGGER.info(summary);
+        return summary;
+    }
+
+    /** 本人撤回一条待审：内容直接删掉，不进禁止上传名单。 */
+    public String withdraw(String reviewId, java.util.UUID uploaderId) {
+        if (!PendingQueue.validReviewId(reviewId)) {
+            return "编号不合法";
+        }
+        var entry = PendingQueue.get().find(reviewId);
+        if (entry == null) {
+            return "没有这个待审条目";
+        }
+        var removed = PendingQueue.get().withdraw(reviewId, uploaderId.toString());
+        if (removed == null) {
+            return "只能取消自己上传的内容";
+        }
+        return "已取消 " + reviewId + "（" + removed.fileName() + "）";
+    }
+
+    /** 批准一条待审：把文件搬进模型根、记台账、触发重扫，并通知上传者。 */
+    public String approve(String reviewId) {
+        if (!PendingQueue.validReviewId(reviewId)) {
+            return "编号不合法";
+        }
+        var entry = PendingQueue.get().find(reviewId);
+        if (entry == null) {
+            return "没有这个待审条目";
+        }
+        var directory = PendingQueue.directoryOf(reviewId);
+        try {
+            var files = Files.list(directory).filter(Files::isRegularFile).toList();
+            if (files.isEmpty()) {
+                PendingQueue.get().removeEntry(reviewId);
+                deleteQuietly(directory);
+                return "待审文件已丢失，记录已清理";
+            }
+            var target = RelayConfig.targetAuthRoot() ? RelayPaths.authRoot() : RelayPaths.uploadRoot();
+            Files.createDirectories(target);
+            var source = files.get(0);
+            var destination = land(source, target,
+                safeName(entry.fileName(), Hash256.parse(entry.modelId()),
+                    extensionOfName(source.getFileName().toString())));
+            var hash = Hash256.parse(entry.modelId());
+            pendingCommits.put(hash, destination);
+            UploadRegistry.get().record(hash, entry.uploaderId(), entry.uploaderName(), entry.fileName(),
+                entry.size());
+            PendingQueue.get().removeEntry(reviewId);
+            deleteQuietly(directory);
+            requestReload();
+            notifyUploader(entry, "你的模型已被服主批准入库：" + entry.fileName());
+            return "已批准 " + reviewId + "（" + entry.fileName() + "）";
+        } catch (IOException | RuntimeException failure) {
+            LOGGER.warn("[ysm-relay] 批准待审失败 review={}", reviewId, failure);
+            return "批准失败：" + failure.getMessage();
+        }
+    }
+
+    /** 拒绝一条待审：删掉内容并把记录摘掉。 */
+    public String reject(String reviewId) {
+        if (!PendingQueue.validReviewId(reviewId)) {
+            return "编号不合法";
+        }
+        var entry = PendingQueue.get().find(reviewId);
+        if (entry == null) {
+            return "没有这个待审条目";
+        }
+        PendingQueue.get().removeEntry(reviewId);
+        deleteQuietly(PendingQueue.directoryOf(reviewId));
+        notifyUploader(entry, "你的模型被服主拒绝了：" + entry.fileName());
+        return "已拒绝 " + reviewId + "（" + entry.fileName() + "）";
+    }
+
+    /** 批准/拒绝之后告诉上传者（他可能已经离线，此时静默跳过）。 */
+    private static void notifyUploader(PendingQueue.Entry entry, String text) {
+        try {
+            var server = net.minecraftforge.server.ServerLifecycleHooks.getCurrentServer();
+            if (server == null) {
+                return;
+            }
+            var player = server.getPlayerList().getPlayer(java.util.UUID.fromString(entry.uploaderId()));
+            if (player != null) {
+                player.sendSystemMessage(net.minecraft.network.chat.Component.literal("[ysm-relay] " + text));
+            }
+        } catch (RuntimeException ignored) {
+            // 通知失败不影响审批结果
+        }
     }
 
     private void complete(ServerPlayer player, ServerUpload upload, int status, byte[] modelId, String location,
@@ -461,10 +701,19 @@ public final class UploadService {
     // ------------------------------------------------------------------
 
     private void requestReload() {
-        var due = System.currentTimeMillis() + RELOAD_MERGE_WINDOW_MS;
+        // 自动同步关闭时文件照样落盘，只是不 reload —— 等服主手动同步。
+        if (!RelayConfig.autoSync()) {
+            LOGGER.info("[ysm-relay] 自动同步已关闭，本次入库不触发 reload");
+            // 不 reload 就无法核对，先留着 pendingCommits：它同时承担「重扫前判重」的作用。
+            return;
+        }
+        // 合并窗口取「固定 500ms」与「服主配的最短间隔」中较大的那个，
+        // 连续上传会被合并到同一个窗口，避免十个人上传扫十遍。
+        var window = Math.max(RELOAD_MERGE_WINDOW_MS, RelayConfig.autoSyncMinIntervalMillis());
+        var due = System.currentTimeMillis() + window;
         reloadDueAt.updateAndGet(previous -> Math.max(previous, due));
         if (reloadScheduled.compareAndSet(false, true)) {
-            reloader.schedule(this::runReload, RELOAD_MERGE_WINDOW_MS, TimeUnit.MILLISECONDS);
+            reloader.schedule(this::runReload, window, TimeUnit.MILLISECONDS);
         }
     }
 
@@ -511,14 +760,21 @@ public final class UploadService {
             if (!pendingCommits.remove(modelId, file)) {
                 continue;
             }
+            if (!Files.exists(file)) {
+                // 文件已经不在了（外部删除或上次启动清理），这里无事可做。
+                UploadRegistry.get().remove(modelId);
+                continue;
+            }
             var committed = YsmBridge.modelIdOfFile(file).filter(modelId::equals).isPresent();
             if (committed) {
                 LOGGER.info("[ysm-relay] 入库确认 id={} file={}", modelId, file.getFileName());
                 continue;
             }
-            deleteQuietly(file);
-            UploadRegistry.get().remove(modelId);
-            LOGGER.warn("[ysm-relay] 模型没进目录（同内容更早的一份已在服上），已删除多余文件 id={} file={}",
+            // 查不到不等于文件没用：旧版容器与压缩包是 YSM 的「模型源」，由它自己导入并
+            // 建索引，用直放容器的读法去核对这些文件必然查不到。以前这里直接删文件，
+            // 结果就是每上传一次，上一次的模型连同源文件一起消失。
+            // 现在只保留文件并提示，绝不因为「核对不上」删除玩家上传的内容。
+            LOGGER.warn("[ysm-relay] 未能在目录里确认该模型 id={} file={}（文件已保留，请检查 YSM 扫描错误）",
                 modelId, file.getFileName());
         }
     }
@@ -653,6 +909,75 @@ public final class UploadService {
     }
 
     // ------------------------------------------------------------------
+
+    /**
+     * 落盘用的文件名：优先保留玩家原本的文件名。
+     *
+     * <p>用模型标识（一串十六进制）当文件名时，YSM 的列表会把文件名当显示名，
+     * 玩家看到的就是一长串十六进制，看起来像乱码。这里保留原名，只做必要的清理。
+     */
+    static String safeName(String original, Hash256 modelId, String extension) {
+        var ext = extension == null || extension.isEmpty() ? ".ysm" : extension;
+        var base = original == null ? "" : original.trim();
+        var slash = Math.max(base.lastIndexOf('/'), base.lastIndexOf('\\'));
+        if (slash >= 0) {
+            base = base.substring(slash + 1);
+        }
+        var lowered = base.toLowerCase(Locale.ROOT);
+        for (var allowed : ALLOWED_EXTENSIONS) {
+            if (lowered.endsWith(allowed)) {
+                base = base.substring(0, base.length() - allowed.length());
+                break;
+            }
+        }
+        base = base.replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]", "_").trim();
+        if (base.isEmpty()) {
+            base = modelId.toString();
+        }
+        if (base.length() > 80) {
+            base = base.substring(0, 80);
+        }
+        return base + ext;
+    }
+
+    /**
+     * 把文件搬进目标目录，绝不覆盖已有文件。
+     *
+     * <p>{@link #uniqueTarget} 只保证「此刻不重名」，两个人同时上传同名文件时仍可能选到同一个
+     * 落点。所以这里不用 REPLACE_EXISTING：撞上了就重新挑一个名字再试。
+     */
+    private static Path land(Path source, Path directory, String fileName) throws IOException {
+        for (var attempt = 0; attempt < 8; attempt++) {
+            var candidate = uniqueTarget(directory, fileName);
+            try {
+                Files.move(source, candidate);
+                return candidate;
+            } catch (java.nio.file.FileAlreadyExistsException race) {
+                // 另一个线程刚占了这个名字，换下一个
+            }
+        }
+        throw new IOException("无法在目标目录里找到不重名的文件名：" + fileName);
+    }
+
+    /** 重名时加序号，绝不覆盖已在目录里的文件。 */
+    static Path uniqueTarget(Path directory, String fileName) {
+        var dot = fileName.lastIndexOf('.');
+        var stem = dot < 0 ? fileName : fileName.substring(0, dot);
+        var ext = dot < 0 ? "" : fileName.substring(dot);
+        var candidate = directory.resolve(fileName);
+        var index = 2;
+        while (Files.exists(candidate) && index < 100) {
+            candidate = directory.resolve(stem + " (" + index + ")" + ext);
+            index++;
+        }
+        return candidate;
+    }
+
+    /** 从文件名取扩展名，保留大小写不敏感的原样值。 */
+    static String extensionOfName(String name) {
+        var dot = name.lastIndexOf('.');
+        return dot < 0 ? ".ysm" : name.substring(dot);
+    }
 
     private static void deleteQuietly(Path path) {
         try {

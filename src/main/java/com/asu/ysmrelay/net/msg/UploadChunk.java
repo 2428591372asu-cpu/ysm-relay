@@ -15,7 +15,7 @@ import java.util.function.Supplier;
  */
 public final class UploadChunk {
     /** 单包硬上限。channel 走 Minecraft 的 1 MiB 包上限，这里留足够余量。 */
-    public static final int MAX_DATA_BYTES = 512 * 1024;
+    public static final int MAX_DATA_BYTES = 16 * 1024;
 
     public final long transferId;
     public final int seq;

@@ -85,16 +85,6 @@ public final class UploadResult {
         this.message = message == null ? "" : message;
     }
 
-    /** 是否算出「这份内容现在服务端已经有了」这个成功结局。 */
-    public boolean succeeded() {
-        return status == COMMITTED || status == ALREADY_AVAILABLE;
-    }
-
-    /** 是否还在等服主拍板（此时内容留在服务端，没进目录）。 */
-    public boolean awaitingOwner() {
-        return status == PENDING_REVIEW;
-    }
-
     public static void encode(UploadResult message, FriendlyByteBuf buffer) {
         buffer.writeVarLong(message.transferId);
         buffer.writeVarInt(message.status);

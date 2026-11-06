@@ -73,6 +73,17 @@ public final class UploadRegistry {
         save();
     }
 
+    /** 按 UUID 记账：批准待审时上传者可能已经离线。 */
+    public synchronized void record(Hash256 modelId, String uploaderId, String uploaderName, String fileName,
+        long size) {
+        loadOnce();
+        var key = modelId.toString();
+        entries.put(key, new Entry(key, uploaderId == null ? "" : uploaderId,
+            uploaderName == null ? "" : uploaderName, fileName == null ? "" : fileName, size,
+            System.currentTimeMillis()));
+        save();
+    }
+
     public synchronized Optional<Entry> find(Hash256 modelId) {
         loadOnce();
         return Optional.ofNullable(entries.get(modelId.toString()));

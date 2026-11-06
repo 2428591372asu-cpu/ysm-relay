@@ -342,24 +342,6 @@ public final class AuthAdmin {
         }
     }
 
-    /** 把玩家 UUID 列表格式化成可读名字，只用于命令回显。 */
-    public static String describePlayers(MinecraftServer server, Collection<UUID> players) {
-        if (players.isEmpty()) {
-            return "-";
-        }
-        var names = new ArrayList<String>(players.size());
-        for (var uuid : players) {
-            var online = server.getPlayerList().getPlayer(uuid);
-            if (online != null) {
-                names.add(online.getGameProfile().getName());
-                continue;
-            }
-            var cached = server.getProfileCache() == null ? null : server.getProfileCache().get(uuid).orElse(null);
-            names.add(cached == null ? uuid.toString().substring(0, 8) : cached.getName());
-        }
-        return String.join(", ", names);
-    }
-
     private static final class StoredFile {
         int version;
         Map<String, StoredRule> models;

@@ -1,6 +1,5 @@
 package com.asu.ysmrelay.client;
 
-import com.asu.ysmrelay.upload.RelayPaths;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -16,6 +15,7 @@ import net.minecraft.Util;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import org.jetbrains.annotations.Nullable;
@@ -36,11 +36,23 @@ public final class UploadPanelScreen extends Screen {
     private static final int ROW_HEIGHT = 22;
     private static final int MAX_ROWS = 500;
     private static final int SCAN_DEPTH = 6;
-    private static final List<String> EXTENSIONS = List.of(".mxc", ".ysm", ".zip");
+    private static final List<String> EXTENSIONS = List.of(".mxc", ".ysm", ".zip", ".7z");
 
     private final List<LocalModel> models = new ArrayList<>();
     /** 选中的文件路径。用 LinkedHashSet 保持点击顺序，上传顺序与玩家点击顺序一致。 */
     private final Set<Path> selected = new LinkedHashSet<>();
+    /** 搜索过滤后的可见列表。 */
+    private final List<LocalModel> view = new ArrayList<>();
+    private int page;
+    @Nullable
+    private EditBox searchBox;
+
+    /** 已经通过 YSM 解析器验证的文件。 */
+    private static final Set<Path> verified = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    /** 预检没通过的文件 → 原因。只作为提示，不再禁止上传（最终由服务端判定）。 */
+    private static final java.util.Map<Path, String> rejected =
+        new java.util.concurrent.ConcurrentHashMap<>();
+    private static volatile boolean validating;
 
     private int listLeft;
     private int listRight;
@@ -48,26 +60,58 @@ public final class UploadPanelScreen extends Screen {
     private int listBottom;
     private int scroll;
 
+    /** 上一级界面；从 YSM 模型界面进来时是一个真实屏幕，从快捷键进来时为 null。 */
+    @Nullable
+    private final Screen parent;
+
     @Nullable
     private Button uploadButton;
+
+    @Nullable
+    private Button cancelButton;
     @Nullable
     private Button selectAllButton;
 
     public UploadPanelScreen() {
+        this(null);
+    }
+
+    public UploadPanelScreen(@Nullable Screen parent) {
         super(Component.translatable("screen.ysm_relay.upload.title"));
+        this.parent = parent;
+    }
+
+    @Override
+    public void onClose() {
+        // 「取消」和 ESC 都按返回上一级处理，而不是直接回到游戏。
+        var minecraft = Minecraft.getInstance();
+        ScreenNavigator.backTo(parent);
     }
 
     @Override
     protected void init() {
         listLeft = width / 2 - 190;
         listRight = width / 2 + 190;
-        listTop = 58;
+        listTop = 84;
         listBottom = height - 78;
 
         models.clear();
-        models.addAll(scan(RelayPaths.uploadRoot()));
+        models.addAll(scan(ClientPaths.manualFolder()));
         // 选中项按路径保留，重开界面时清掉已经不在列表里的
         selected.removeIf(path -> models.stream().noneMatch(model -> model.path().equals(path)));
+
+        searchBox = new EditBox(font, listLeft, 58, listRight - listLeft - 80, 18,
+            Component.translatable("screen.ysm_relay.upload.search"));
+        searchBox.setResponder(text -> applyFilter());
+        addRenderableWidget(searchBox);
+        addRenderableWidget(Button.builder(Component.translatable("screen.ysm_relay.upload.choose_folder"),
+                button -> Minecraft.getInstance().setScreen(new UploadFolderScreen(this)))
+            .bounds(listRight - 160, 34, 72, 16).build());
+        addRenderableWidget(Button.builder(Component.literal("<"), button -> turnPage(-1))
+            .bounds(listRight - 74, 58, 22, 18).build());
+        addRenderableWidget(Button.builder(Component.literal(">"), button -> turnPage(1))
+            .bounds(listRight - 48, 58, 22, 18).build());
+        applyFilter();
 
         var footer = height - 56;
         selectAllButton = addRenderableWidget(Button
@@ -76,25 +120,107 @@ public final class UploadPanelScreen extends Screen {
         uploadButton = addRenderableWidget(Button
             .builder(Component.translatable("screen.ysm_relay.upload.upload"), button -> uploadSelected())
             .bounds(width / 2 - 114, footer, 72, 20).build());
-        addRenderableWidget(Button.builder(Component.translatable("screen.ysm_relay.upload.cancel"), button -> {
-            ClientUploads.cancel();
-        }).bounds(width / 2 - 38, footer, 72, 20).build());
+        cancelButton = addRenderableWidget(Button.builder(Component.translatable("screen.ysm_relay.upload.cancel"),
+            button -> {
+                if (ClientUploads.busy()) {
+                    ClientUploads.cancel();
+                } else {
+                    onClose();
+                }
+            }).bounds(width / 2 - 38, footer, 72, 20).build());
         addRenderableWidget(Button
             .builder(Component.translatable("screen.ysm_relay.upload.rescan"), button -> rescan())
             .bounds(width / 2 + 38, footer, 72, 20).build());
-        addRenderableWidget(Button.builder(Component.translatable("screen.ysm_relay.upload.folder"), button -> {
-            Util.getPlatform().openFile(RelayPaths.uploadRoot().toFile());
-        }).bounds(width / 2 + 114, footer, 76, 20).build());
+        addRenderableWidget(Button.builder(Component.translatable("screen.ysm_relay.upload.folder"), button ->
+                ClientFiles.openFolder(ClientPaths.manualFolder()))
+            .bounds(width / 2 + 114, footer, 76, 20).build());
+        // 常驻返回键：上传进行中 cancelButton 会变成「中断」，那时候仍需要一个纯粹的返回。
+        addRenderableWidget(Button.builder(Component.translatable("screen.ysm_relay.upload.back"),
+                button -> onClose())
+            .bounds(width / 2 + 114, height - 30, 76, 20).build());
 
+        validateAsync();
         refreshButtons();
+    }
+
+    /**
+     * 后台预检：只给提示，不做硬性拦截。
+     *
+     * <p>早先的版本把解析失败直接标成「不支持的模型」并禁止勾选，结果把大量正常模型
+     * （尤其编译过的 .ysm 容器）挡在外面——解析入口和 YSM 真正导入的路径并不相同，
+     * 失败也不一定代表文件坏。现在失败只记原因，收不收由服务端说了算。
+     */
+    private void validateAsync() {
+        if (validating) {
+            return;
+        }
+        var pendingList = new ArrayList<Path>();
+        for (var model : models) {
+            if (!verified.contains(model.path()) && !rejected.containsKey(model.path())) {
+                pendingList.add(model.path());
+            }
+        }
+        if (pendingList.isEmpty()) {
+            return;
+        }
+        validating = true;
+        var thread = new Thread(() -> {
+            try {
+                for (var path : pendingList) {
+                    try {
+                        com.asu.ysmrelay.upload.ModelIdentity.of(path);
+                        verified.add(path);
+                    } catch (IOException | RuntimeException invalid) {
+                        rejected.put(path, invalid.getMessage() == null
+                            ? invalid.getClass().getSimpleName() : invalid.getMessage());
+                    }
+                }
+            } finally {
+                validating = false;
+                Minecraft.getInstance().execute(this::refreshButtons);
+            }
+        }, "ysm-relay-validate");
+        thread.setDaemon(true);
+        thread.start();
+    }
+
+    /** 按搜索框内容重建可见列表，并把页码拉回第一页。 */
+    private void applyFilter() {
+        var query = searchBox == null ? "" : searchBox.getValue().trim().toLowerCase(Locale.ROOT);
+        view.clear();
+        for (var model : models) {
+            if (query.isEmpty()
+                || model.relative().toLowerCase(Locale.ROOT).contains(query)) {
+                view.add(model);
+            }
+        }
+        page = 0;
+        scroll = 0;
+        refreshButtons();
+    }
+
+    /** 翻页：一次一屏。 */
+    private void turnPage(int delta) {
+        var visible = Math.max(1, (listBottom - listTop) / ROW_HEIGHT);
+        var maxPage = Math.max(0, (view.size() - 1) / visible);
+        var next = Math.max(0, Math.min(maxPage, page + delta));
+        if (next != page) {
+            page = next;
+            scroll = page * visible;
+        }
     }
 
     /** 重新扫描本机模型根。只换数据，不重建控件——重建会改正在被点击遍历的 renderables。 */
     private void rescan() {
+        // 上一轮的预检结论作废：文件可能刚下载完，也可能上一轮是环境问题。
+        verified.clear();
+        rejected.clear();
         models.clear();
-        models.addAll(scan(RelayPaths.uploadRoot()));
+        models.addAll(scan(ClientPaths.manualFolder()));
         selected.removeIf(path -> models.stream().noneMatch(model -> model.path().equals(path)));
         scroll = 0;
+        applyFilter();
+        validateAsync();
         refreshButtons();
     }
 
@@ -108,23 +234,32 @@ public final class UploadPanelScreen extends Screen {
         if (uploadButton != null) {
             uploadButton.active = !ClientUploads.busy() && !selected.isEmpty();
         }
+        if (cancelButton != null) {
+            // 有上传在跑时它是「中断」，否则是「返回上一级」。
+            cancelButton.setMessage(Component.translatable(ClientUploads.busy()
+                ? "screen.ysm_relay.upload.stop"
+                : "screen.ysm_relay.upload.back"));
+        }
         if (selectAllButton != null) {
-            var allSelected = !models.isEmpty() && selected.size() >= models.size();
+            var selectable = view.size();
+            var allSelected = selectable > 0 && selected.size() >= selectable;
             selectAllButton.setMessage(Component.translatable(
                 allSelected ? "screen.ysm_relay.upload.none" : "screen.ysm_relay.upload.all"));
-            selectAllButton.active = !models.isEmpty();
+            selectAllButton.active = selectable > 0;
         }
     }
 
     /** 全选 / 全不选。已经有没选中的就全选，否则清空。 */
     private void toggleSelectAll() {
-        var allSelected = !models.isEmpty() && selected.size() >= models.size();
+        var selectable = new ArrayList<Path>();
+        for (var model : view) {
+            selectable.add(model.path());
+        }
+        var allSelected = !selectable.isEmpty() && selected.size() >= selectable.size();
         if (allSelected) {
             selected.clear();
         } else {
-            for (var model : models) {
-                selected.add(model.path());
-            }
+            selected.addAll(selectable);
         }
         refreshButtons();
     }
@@ -135,7 +270,7 @@ public final class UploadPanelScreen extends Screen {
         }
         // 按列表顺序取，不用 selected 的插入顺序 —— 玩家看到的是列表，上传顺序应当跟列表一致
         var files = new ArrayList<Path>();
-        for (var model : models) {
+        for (var model : view) {
             if (selected.contains(model.path())) {
                 files.add(model.path());
             }
@@ -162,11 +297,12 @@ public final class UploadPanelScreen extends Screen {
         super.render(graphics, mouseX, mouseY, partialTick);
 
         graphics.drawCenteredString(font, title, width / 2, 16, 0xFFFFFF);
-        var root = RelayPaths.uploadRoot().toString();
-        graphics.drawString(font, Component.literal(root).withStyle(ChatFormatting.DARK_GRAY),
+        var root = ClientPaths.manualFolder().toString();
+        var shown = root.length() <= 62 ? root : "…" + root.substring(root.length() - 61);
+        graphics.drawString(font, Component.literal(shown).withStyle(ChatFormatting.DARK_GRAY),
             width / 2 - 190, 34, 0xAAAAAA, false);
         graphics.drawString(font,
-            Component.translatable("screen.ysm_relay.upload.count", models.size()),
+            Component.translatable("screen.ysm_relay.upload.count", view.size()),
             width / 2 - 190, 46, 0xCCCCCC, false);
         if (!selected.isEmpty()) {
             var picked = Component.translatable("screen.ysm_relay.upload.selected", selected.size())
@@ -176,7 +312,7 @@ public final class UploadPanelScreen extends Screen {
 
         graphics.fill(listLeft - 2, listTop - 2, listRight + 2, listBottom + 2, 0x50000000);
 
-        if (models.isEmpty()) {
+        if (view.isEmpty()) {
             graphics.drawCenteredString(font, Component.translatable("screen.ysm_relay.upload.empty"),
                 (listLeft + listRight) / 2, (listTop + listBottom) / 2, 0xAAAAAA);
         } else {
@@ -188,11 +324,11 @@ public final class UploadPanelScreen extends Screen {
 
     private void renderRows(GuiGraphics graphics, int mouseX, int mouseY) {
         var visible = (listBottom - listTop) / ROW_HEIGHT;
-        var last = Math.min(models.size(), scroll + visible + 1);
+        var last = Math.min(view.size(), scroll + visible);
         graphics.enableScissor(listLeft, listTop, listRight, listBottom);
         for (var index = scroll; index < last; index++) {
             var rowY = listTop + (index - scroll) * ROW_HEIGHT;
-            var model = models.get(index);
+            var model = view.get(index);
             var hovered = mouseX >= listLeft && mouseX <= listRight && mouseY >= rowY && mouseY < rowY + ROW_HEIGHT;
 
             if (selected.contains(model.path())) {
@@ -203,7 +339,9 @@ public final class UploadPanelScreen extends Screen {
 
             graphics.drawString(font, selected.contains(model.path()) ? "▣" : "▢", listLeft + 5, rowY + 7,
                 0xFFFFFF, false);
-            graphics.drawString(font, model.label(), listLeft + 20, rowY + 7, 0xFFFFFF, false);
+            var bad = rejected.containsKey(model.path());
+            graphics.drawString(font, bad ? model.label() + "  ⚠ 预检未通过（仍可上传）" : model.label(),
+                listLeft + 20, rowY + 7, bad ? 0xFFD27F : 0xFFFFFF, false);
 
             var size = Component.literal(formatSize(model.size())).withStyle(ChatFormatting.GRAY);
             graphics.drawString(font, size, listRight - 6 - font.width(size), rowY + 7, 0xAAAAAA, false);
@@ -216,10 +354,9 @@ public final class UploadPanelScreen extends Screen {
         }
         graphics.disableScissor();
 
-        if (models.size() > visible) {
-            var hint = (scroll + 1) + "-" + Math.min(models.size(), scroll + visible) + " / " + models.size();
-            graphics.drawString(font, hint, listRight - font.width(hint), listBottom + 4, 0x888888, false);
-        }
+        var maxPage = Math.max(1, (view.size() + visible - 1) / visible);
+        var hint = (page + 1) + " / " + maxPage + "   (" + view.size() + ")";
+        graphics.drawString(font, hint, listRight - font.width(hint), listBottom + 4, 0x888888, false);
     }
 
     /** 每行的状态位：这一批里这个文件的结局。没参与本批返回 null，不画。 */
@@ -264,8 +401,9 @@ public final class UploadPanelScreen extends Screen {
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         if (button == 0 && mouseX >= listLeft && mouseX <= listRight && mouseY >= listTop && mouseY < listBottom) {
             var index = scroll + (int)((mouseY - listTop) / ROW_HEIGHT);
-            if (index >= 0 && index < models.size()) {
-                var path = models.get(index).path();
+            if (index >= 0 && index < view.size()) {
+                var path = view.get(index).path();
+
                 if (!selected.remove(path)) {
                     selected.add(path);
                 }
@@ -278,9 +416,7 @@ public final class UploadPanelScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double delta) {
-        var visible = Math.max(1, (listBottom - listTop) / ROW_HEIGHT);
-        var maxScroll = Math.max(0, models.size() - visible);
-        scroll = (int)Math.max(0, Math.min(maxScroll, scroll - delta * 2));
+        turnPage(delta > 0 ? -1 : 1);
         return true;
     }
 

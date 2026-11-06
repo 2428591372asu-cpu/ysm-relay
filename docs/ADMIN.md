@@ -1,124 +1,131 @@
 # ysm-relay 服主管理面
 
-面向开服的人。所有命令需要权限等级 2（与 YSM 自带的 `/ysm` 一致）。
+面向开服的人。命令与设置页都需要相应权限等级。
 
-## 一句话结论：控制粒度由「文件放在哪个目录根」决定，不由开关决定
+## 一句话：模型能不能被选，取决于它放在哪个根
 
-YSM 3.0 的选中判定只有一条：
+YSM 3.0 的判定只有一条：
 
 ```
 canSelect(modelId) = record != null && (access == PUBLIC || grants.contains(modelId))
 access = (模型所在根 == auth) ? AUTHORIZED : PUBLIC
 ```
 
-所以：
-
 | 模型放在 | 玩家能不能选 | relay 的授权矩阵管不管用 |
-|---|---|---|
-| `custom` 根（public） | 谁都能选 | **不管用**，YSM 不看 grant |
-| `auth` 根（authorized） | 只有拿到 grant 的玩家 | 管用 |
+| --- | --- | --- |
+| `custom`（public） | 谁都能选 | 不管用，YSM 不看 grant |
+| `auth`（authorized） | 只有拿到 grant 的玩家 | 管用 |
 
-客户端也按同一规则过滤：`auth` 根的模型在没有 grant 时不会出现在模型选择页。
+落点由 `targetRoot` 决定，默认 `custom`。要逐玩家管理就改成 `auth`，之后新上传的模型默认谁都不能选，需要用 `policy` 授权。
 
-**因此：想让服主逐个玩家控制模型，模型必须落在 auth 根。**
-上传落点由 `config/ysm-relay-common.toml` 的 `upload.targetRoot` 决定，默认 `custom`。
-要开逐玩家管理，改成 `auth`：
+## 权限等级
 
-```toml
-[upload]
-    targetRoot = "auth"
-```
+| 等级 | 谁能达到 |
+| --- | --- |
+| 1 | 所有玩家 |
+| 2 | 授权组、在线 op |
+| 3 | 服主（存档主人 / 专用服务器控制台） |
 
-默认 `custom` 是为了「上传即所有人可见」这个最常见诉求；改成 `auth` 之后新上传的模型默认谁都不能选，
-需要服主用下面的命令授权。
+每个配置项与命令群都有独立的所需等级，定义在 `RelayConfig` 的 `option()` 登记里，客户端设置页按等级置灰。等级由服务端每次现算，客户端显示只是提示。
 
-## 三种策略
+## 配置文件
 
-`/ysmrelay policy <模型> <策略>`：
-
-| 策略 | 含义 | 模型应在 |
-|---|---|---|
-| `public` | 人人可用 | custom 根 |
-| `listed <玩家...>` | 只有名单上的玩家可用 | auth 根 |
-| `except <玩家...>` | 除名单上的玩家以外人人可用 | auth 根 |
-
-YSM 没有「某玩家不能用某模型」的黑名单判定点，`except` 是唯一不改 YSM 的实现方式：
-模型放 auth 根，然后给除名单外的所有玩家发 grant。
-
-「某模型仅给某玩家使用」= `policy <模型> listed <该玩家>`。
+`<存档目录>/serverconfig/ysm-relay-server.toml`（Forge 的 SERVER 配置不在 `config/` 下）。首次启动生成，改完重启生效。键表见 [README](../README.md#配置)。
 
 ## 命令
 
+### 总览与诊断
+
 ```
-/ysmrelay status                        YSM 版本、模型数、策略数、禁止上传数、当前上传落点
-/ysmrelay list [页码]                    列出所有策略（每页 8 条）
-/ysmrelay show <玩家>                    该玩家当前持有的授权 + 策略是否与运行时一致
-/ysmrelay policy <模型> public           设为人人可用
-/ysmrelay policy <模型> listed <玩家...>  只给这些玩家
-/ysmrelay policy <模型> except <玩家...>  除这些玩家以外所有人
-/ysmrelay policy <模型> clear            删除策略，回到 YSM 默认语义
-/ysmrelay grant <玩家> <模型>            往名单里加一个人（策略必须是 listed/except）
-/ysmrelay revoke <玩家> <模型>           从名单里移除一个人
-/ysmrelay move <模型> auth|custom        在 auth / custom 根之间搬文件（搬完自动重扫）
-/ysmrelay delete <模型> confirm          删除服务端的模型文件，并加入禁止上传名单
-/ysmrelay block <模型>                   只禁止再次上传，不删已有文件
-/ysmrelay unblock <64位modelId>           取消禁止（被删的模型已不在目录里，只能给完整哈希）
-/ysmrelay refresh [玩家]                 按矩阵重推授权
+/ysmrelay status                  YSM 版本、模型数、策略数、禁止上传数、落点
+/ysmrelay paths                   打印模型根 / 暂存根 / 待审根与实际文件数
+/ysmrelay refresh [玩家]          按矩阵重推授权
 ```
 
-模型参数三种写法都行：
+`paths` 是最常用的排障入口：上传“成功”但看不到时，先确认它打出来的上传根是不是你以为的那个目录。
 
-- 完整 64 位十六进制 modelId
-- 8 位以上的十六进制前缀（唯一匹配才生效）
-- YSM 的公开地址，例如 `local:auth/xxx.mxc`
+### 待审队列
 
-## 删除玩家上传的模型
+```
+/ysmrelay pending [页码]          按时间倒序列出待审条目
+/ysmrelay approve <编号>          批准：文件进模型根并重扫
+/ysmrelay reject <编号>           拒绝：删掉内容并通知上传者
+```
 
-`/ysmrelay delete <模型> confirm`
+模式切到 `auto` 或 `full` 时，队列里已有的条目会按新规则自动处理一遍：未超上限直接批准；`full` 档超上限直接拒绝；`auto` 档超上限保留待人工。处理结果会在动作栏显示。
 
-按这个顺序做四件事，任何一步失败都会如实报出来：
+### 授权矩阵
 
-1. 撤销所有在线玩家对该模型的 grant（先撤授权，再删文件；反过来会让玩家短暂持有一个已消失模型的授权）
-2. 从授权矩阵里删掉这条策略
-3. 删掉磁盘上的容器文件，然后重扫目录
-4. 把 modelId 写进「禁止上传名单」
+```
+/ysmrelay policy <模型> public            人人可用
+/ysmrelay policy <模型> listed <玩家...>   只给名单上的人
+/ysmrelay policy <模型> except <玩家...>   除名单外所有人
+/ysmrelay policy <模型> clear             删除策略
+/ysmrelay grant <玩家> <模型>             往名单加人（策略须为 listed/except）
+/ysmrelay revoke <玩家> <模型>            从名单移除
+/ysmrelay list [页码] / show <玩家>        查看策略与运行时一致性
+```
 
-第 4 步是必须的：不记禁止名单的话，上传通道下一次探测就会把这个 modelId 又收回来，删了等于没删。
-`blocked` 列表和授权矩阵存在同一个 `authz.json` 里。
+YSM 没有「禁止某人用某模型」的判定点，`except` 是唯一不改 YSM 的实现：模型放 `auth` 根，再给除名单外的所有玩家发 grant。
 
-`/ysmrelay block <模型>` 只做第 4 步，用于「文件留着但别再传」的场景。
+### 模型文件
 
-**删除也可能失败**：YSM 的容器对象可能还开着文件句柄，Windows 上此时 `Files.delete` 报错。
-失败会保留策略和禁止名单的现状，提示「可先重启服务端再删」，不会假装删成功。
+```
+/ysmrelay move <模型> auth|custom         在两个根之间搬文件（搬完自动重扫）
+/ysmrelay delete <模型> confirm           删除模型，并加入禁止上传名单
+/ysmrelay block <模型> / unblock <模型>    只禁止/允许再次上传
+```
 
-## 数据放哪
+模型参数三种写法：完整 64 位哈希、8 位以上唯一前缀、`global:custom/xxx.mxc` 这类地址。
+
+### 名单
+
+```
+/ysmrelay blockuploader add|remove|list <玩家>   禁止这些玩家上传
+/ysmrelay whitelist add|remove|list <玩家>       白名单：免审、跳过配额与等级限制
+/ysmrelay level grant|revoke|list <玩家> [等级]  临时授予等级
+```
+
+## 删除一个模型会发生什么
+
+/ysmrelay delete <模型> confirm 的顺序：
+
+1. 撤销所有在线玩家对该模型的 grant
+2. 从授权矩阵删掉这条策略
+3. 删除 YSM 的转换缓存目录 `cache/converted/…/objects/<模型标识>/`，以及 `custom`/`auth` 里同名源文件
+4. 重扫目录
+5. 把模型写进禁止上传名单（只做第 5 步的是 `/ysmrelay block`）
+
+为什么缓存和源文件都要删：YSM 导入源文件后，目录真正引用的是缓存里的容器。只删源文件，模型还在缓存里；只删缓存，下次重扫会从源文件再导一次。
+
+**失败是可能的**：Windows 上 YSM 可能仍持有句柄，此时会明确报“删除缓存失败…可先重启服务端再删”，不会假装成功。
+
+**副本会复活**：如果 `custom` 里还有同一模型另一个文件名的副本，删除后重扫会把它重新导入。这种情况要么手动删副本，要么用 `block` 限制再次上传（禁止名单只拦上传通道，不拦 YSM 扫描已有文件）。
+
+## 数据文件
 
 | 文件 | 内容 |
-|---|---|
-| `config/ysm-relay-common.toml` | 上传总开关、单模型上限、分片大小、落点根 |
-| `config/ysm-relay/authz.json` | 授权矩阵（模型 modelId → 策略 + 名单） |
+| --- | --- |
+| `config/ysm-relay/authz.json` | 授权矩阵（模型 → 策略 + 名单） |
+| `config/ysm-relay/uploads.json` | 上传台账（谁传了什么、多大、何时） |
+| `config/ysm-relay/pending.json` | 待审记录 |
+| `relay-staging/` | 传输残片，TTL 600 秒 |
+| `relay-pending/<编号>/` | 待审内容 |
 
-玩家自己的 grant 集合是 YSM 的 `AuthModelsCapability`，存在玩家 NBT 里。
-两边都要在：`authz.json` 是服主的意图，capability 是运行时事实。玩家登录时用矩阵覆盖事实。
-
-`authz.json` 坏了不会让服务器起不来：读失败按空矩阵继续，只打日志。
+台账跟着**真正跑服务端的实例**走。单机开 LAN 时，服务端就是房主那台客户端，台账在房主的 `config/` 下；换一个实例开服，看到的是另一份台账。
 
 ## 与 YSM 自带 `/ysm auth` 的关系
 
 不是替代，是同一套能力的两个入口：
 
-- `/ysm auth <玩家> add|remove|all|clear <模型>` 直接改 capability，一次性。
-- `/ysmrelay policy ...` 写持久策略，登录时自动重放，还能表达 `except`（YSM 指令做不到）。
+- `/ysm auth` 直接改玩家 capability，一次性；
+- `policy` 写持久策略，登录时自动重放，还能表达 `except`（YSM 指令做不到）。
 
-`/ysmrelay` 只回收**自己矩阵里登记过**的模型授权。用 `/ysm auth` 手工加的授权不会被冲掉。
+relay 只回收自己矩阵里登记过的模型授权，手工加的不会被冲掉。
 
 ## 已知限制
 
-1. **搬文件可能失败**。YSM 的容器对象可能还开着文件句柄，Windows 上此时 `Files.move` 报错。
-   失败会如实上报，不会假装成功。稳定做法是上传时就选好根，而不是事后搬。
-2. **`public` 策略 + auth 根的模型**需要给所有人发 grant 才有意义；`/ysmrelay list` 会把每条的
-   实际根打出来，方便发现这类不一致。
-3. **规模**。`applyAll` 是 O(玩家 × 策略)，每次策略变更和每次玩家登录都会跑一次。
-   策略几百条、在线几十人的量级没问题；上千条策略时需要在登录时只算与该玩家相关的条目。
-4. **单人存档**里客户端还有一个同名 `/ysmrelay status`（调试上传进度用），会遮蔽服务端的同名子命令。
-   服务端管理命令的其它子命令不受影响。
+1. 搬文件可能失败（句柄占用），稳定做法是上传时就选好根。
+2. `public` 策略配 `auth` 根的模型需要给所有人发 grant；`/ysmrelay list` 会打出每条的实际根，便于发现不一致。
+3. `applyAll` 是 O(玩家 × 策略)，策略上千条时登录会变慢。
+4. 名单里存 UUID；玩家改名不影响。
