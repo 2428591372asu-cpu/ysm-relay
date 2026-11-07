@@ -72,6 +72,9 @@ public final class DeleteConfirmScreen extends Screen {
     }
 
     private void confirm() {
+        if (mode != Mode.UNBLOCK) {
+            ClientPaths.setSkipDeleteConfirm(skipNext);
+        }
         var minecraft = Minecraft.getInstance();
         var command = switch (mode) {
             case DELETE -> "ysmrelay delete " + modelId + " confirm";

@@ -58,6 +58,11 @@ public final class RelayLists {
     }
 
     public static void reply(ServerPlayer player, int kind) {
+        // 0 级 = 禁用：所有列表一律回空，管理面另有 canManage/canApprove 过滤。
+        if (!RelayPermissions.canUseMod(player)) {
+            RelayNetwork.toPlayer(player, new DataReply(kind, java.util.List.of()));
+            return;
+        }
         var entries = new ArrayList<DataReply.Entry>();
         var limit = RelayConfig.listMaxEntries();
         var budget = DataReply.MAX_BYTES;

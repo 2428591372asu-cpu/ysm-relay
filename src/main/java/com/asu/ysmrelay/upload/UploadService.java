@@ -326,6 +326,11 @@ public final class UploadService {
         if (upload == null || !upload.playerId.equals(player.getUUID())) {
             return;
         }
+        // 传输途中被授 0 级也要立刻停，不能把剩下的分片收完再入库。
+        if (!RelayPermissions.canUseMod(player)) {
+            abort(player, upload, UploadResult.REJECTED_POLICY, "你已被管理员禁用 relay 功能");
+            return;
+        }
         // 首片嗅探魔数：不是 YSM 容器、压缩包或 7z 的话当场中止，省掉整份带宽。
         if (chunk.seq == 0 && chunk.data != null && !looksLikeModelSource(chunk.data)) {
             abort(player, upload, UploadResult.REJECTED_IDENTITY, "文件内容不是 YSM 模型或支持的压缩包");

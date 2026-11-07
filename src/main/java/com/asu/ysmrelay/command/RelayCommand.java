@@ -532,8 +532,9 @@ public final class RelayCommand {
         root.then(Commands.literal("block").requires(RelayCommand::manageSource)
             .then(Commands.argument(MODEL, StringArgumentType.word())
             .executes(RelayCommand::block)));
+        // 模型名可能带空格 / 中文 / 括号，必须用 greedyString，否则在解析阶段就被 word() 拒掉。
         root.then(Commands.literal("unblock").requires(RelayCommand::manageSource)
-            .then(Commands.argument(MODEL, StringArgumentType.word())
+            .then(Commands.argument(MODEL, StringArgumentType.greedyString())
             .executes(RelayCommand::unblock)));
 
         var blockedList = Commands.literal("blocked").requires(RelayCommand::manageSource);

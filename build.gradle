@@ -98,6 +98,16 @@ legacyForge {
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
     dependsOn 'ysmDevJar'
+    doFirst {
+        // ysmDevJar 在 jar 已存在时会 SKIP，所以缺件检查要放在编译任务上。
+        if (!ysmDevJarFile.exists()) {
+            throw new GradleException(
+                    "缺少 compileOnly 依赖: ${ysmDevJarFile}\n" +
+                    "仓库应自带 libs/${ysmDevJarName}；如果你的仓库里没有，请重新 clone。\n" +
+                    "要跟随本地 YSM 源码：先编译 YSM，再运行 ./gradlew ysmDevJar。\n" +
+                    "当前 YSM_PROJECT_DIR = ${ysmProjectDir}")
+        }
+    }
 }
 
 processResources {
