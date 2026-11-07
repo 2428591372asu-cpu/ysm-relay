@@ -58,8 +58,8 @@ public final class RelayLists {
     }
 
     public static void reply(ServerPlayer player, int kind) {
-        // 0 级 = 禁用：所有列表一律回空，管理面另有 canManage/canApprove 过滤。
-        if (!RelayPermissions.canUseMod(player)) {
+        // 0 级只保留「我的上传」，其余列表回空；管理面另有 canManage/canApprove 过滤。
+        if (!RelayPermissions.canUseMod(player) && kind != DataRequest.KIND_MINE) {
             RelayNetwork.toPlayer(player, new DataReply(kind, java.util.List.of()));
             return;
         }

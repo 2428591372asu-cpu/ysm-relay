@@ -40,6 +40,10 @@ public final class SettingsScreen extends Screen {
 
     private final List<Entry> entries = new ArrayList<>();
     private final List<Header> headers = new ArrayList<>();
+    /** 0 级受限视图：除「我的上传」外全部置灰。 */
+    private boolean restricted;
+    @Nullable
+    private AbstractWidget mineWidget;
     private int scroll;
     private int contentHeight;
     private int viewTop;
@@ -88,10 +92,14 @@ public final class SettingsScreen extends Screen {
 
         var snapshot = ClientSettings.current().orElse(null);
         if (snapshot == null) {
+            restricted = false;
+            mineWidget = null;
             addRenderableWidget(Button.builder(Component.translatable("screen.ysm_relay.settings.loading"),
                 button -> ClientSettings.request()).bounds(width / 2 - 120, viewTop + 10, 240, 20).build());
             return;
         }
+        restricted = snapshot.effectiveLevel <= 0;
+        mineWidget = null;
         var x = width / 2 - 150;
         var width = 300;
         var y = 0;
@@ -140,7 +148,8 @@ public final class SettingsScreen extends Screen {
 
     private void add(AbstractWidget widget, int baseY, boolean editable) {
         addRenderableWidget(widget);
-        entries.add(new Entry(widget, baseY, editable));
+        // 受限视图里只有「我的上传」保持可点；layout() 会按这个值反复校正 active。
+        entries.add(new Entry(widget, baseY, editable && (!restricted || widget == mineWidget)));
     }
 
     private int toggle(ConfigSnapshot snapshot, String option, String labelKey, int x, int width, int y) {
@@ -165,12 +174,18 @@ public final class SettingsScreen extends Screen {
         };
         var button = Button.builder(Component.translatable(label), clicked -> action.run())
             .bounds(x, 0, width, 20).build();
+        if (id.equals("mine")) {
+            mineWidget = button;
+        }
         var host = snapshot.host;
         var enabled = switch (id) {
             case "upload", "mine" -> !host;
             case "pending" -> snapshot.canApprove || snapshot.mayEdit("approveUploads");
             default -> true;
         };
+        if (restricted && id.equals("mine")) {
+            enabled = true;
+        }
         // 全自动模式下待审队列恒空，直接置灰避免误解。
         // 只有「服主的待审队列」随模式置灰；「我的待审」必须一直可用——
         // 自动同意模式下超上限的上传同样会进队列，玩家得能撤回。
@@ -308,6 +323,10 @@ public final class SettingsScreen extends Screen {
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         renderBackground(graphics);
         graphics.drawCenteredString(font, title, width / 2, 18, 0xFFFFFF);
+        if (restricted) {
+            graphics.drawCenteredString(font, Component.translatable("screen.ysm_relay.settings.restricted"),
+                width / 2, 30, 0xFF5555);
+        }
 
         graphics.enableScissor(0, viewTop, width, viewBottom);
         for (var header : headers) {

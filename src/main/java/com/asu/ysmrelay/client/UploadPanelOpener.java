@@ -44,7 +44,8 @@ public final class UploadPanelOpener {
                 continue;
             }
             if (ClientSettings.disabledByServer()) {
-                minecraft.setScreen(new RelayDeniedScreen(null));
+                // 0 级仍可进入功能页，只是除「我的上传」外都置灰。
+                minecraft.setScreen(new SettingsScreen(null));
                 continue;
             }
             if (ClientSettings.isRelayMissing()) {

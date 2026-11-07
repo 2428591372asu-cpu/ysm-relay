@@ -74,7 +74,8 @@ public final class RelayPermissions {
         }
         var granted = RelayConfig.grantedLevel(uuidOf(player));
         if (granted == 0) {
-            // 显式授予 0 级 = 禁用本模组的全部功能，覆盖 op / 组 / 房主推断。
+            // 0 级只保留自助面：可进功能页、只能管理自己的上传；
+            // 上传、审批、管理他人、改配置仍然全部被拒。覆盖 op / 组 / 房主推断。
             return 0;
         }
         return Math.max(level, granted);

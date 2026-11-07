@@ -373,24 +373,7 @@ public final class RelayCommand {
     }
 
     /** 列出自己上传过的模型。 */
-    /** 0 级玩家不能用任何 relay 自助功能。 */
-    private static boolean requireEnabled(CommandContext<CommandSourceStack> context) {
-        var player = context.getSource().getPlayer();
-        if (player == null) {
-            context.getSource().sendFailure(Component.literal("[ysm-relay] 这条命令只能由玩家执行"));
-            return false;
-        }
-        if (!RelayPermissions.canUseMod(player)) {
-            context.getSource().sendFailure(Component.literal("[ysm-relay] 你已被管理员禁用 relay 功能"));
-            return false;
-        }
-        return true;
-    }
-
     private static int myUploads(CommandContext<CommandSourceStack> context) {
-        if (!requireEnabled(context)) {
-            return 0;
-        }
         var source = context.getSource();
         var player = source.getPlayer();
         if (player == null) {
@@ -423,9 +406,6 @@ public final class RelayCommand {
 
     /** 撤回自己上传、还没被审批的内容。 */
     private static int cancelOwn(CommandContext<CommandSourceStack> context) {
-        if (!requireEnabled(context)) {
-            return 0;
-        }
         var source = context.getSource();
         var player = source.getPlayer();
         if (player == null) {
@@ -440,9 +420,6 @@ public final class RelayCommand {
 
     /** 删除自己上传的模型。服务端按台账复核归属，删完不进制止名单。 */
     private static int deleteOwn(CommandContext<CommandSourceStack> context) {
-        if (!requireEnabled(context)) {
-            return 0;
-        }
         var source = context.getSource();
         var player = source.getPlayer();
         if (player == null) {
