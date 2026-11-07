@@ -121,6 +121,12 @@ public final class SettingsScreen extends Screen {
         y = pendingPerPlayerSlider(snapshot, x, width, y);
         y = modelSlider(snapshot, x, width, y);
 
+        y = header("screen.ysm_relay.section.manage", y);
+        add(Button.builder(Component.translatable("screen.ysm_relay.manage.open"), button ->
+                Minecraft.getInstance().setScreen(new ModelManagerScreen(this)))
+            .bounds(x, 0, width, 20).build(), y, snapshot.canManage);
+        y += ROW_HEIGHT;
+
         contentHeight = y;
         var viewport = viewBottom - viewTop;
         scroll = Math.max(0, Math.min(Math.max(0, contentHeight - viewport), keepScroll));
@@ -224,7 +230,7 @@ public final class SettingsScreen extends Screen {
             Component.translatable("screen.ysm_relay.settings.approve_cap").getString(),
             0, 256, 1, (int) Math.min(Integer.MAX_VALUE, snapshot.autoApproveMaxBytes / MIB),
             snapshot.mayEdit("autoApproveMaxBytes"),
-            value -> value <= 0 ? "∞" : String.format(Locale.ROOT, "%.2f MiB", (double) value),
+            value -> value <= 0 ? "∞" : String.format(Locale.ROOT, "%.2f MB", (double) value),
             value -> send("autoApproveMaxBytes", String.valueOf(value * MIB))),
             y, true);
         return y + ROW_HEIGHT;
@@ -235,7 +241,7 @@ public final class SettingsScreen extends Screen {
             Component.translatable("screen.ysm_relay.settings.model_cap").getString(),
             0, 1024, 4, (int) Math.min(Integer.MAX_VALUE, snapshot.maxModelBytes / MIB),
             snapshot.mayEdit("maxModelBytes"),
-            value -> value <= 0 ? "∞" : String.format(Locale.ROOT, "%.2f MiB", (double) value),
+            value -> value <= 0 ? "∞" : String.format(Locale.ROOT, "%.2f MB", (double) value),
             value -> send("maxModelBytes", String.valueOf(value * MIB))),
             y, true);
         return y + ROW_HEIGHT;

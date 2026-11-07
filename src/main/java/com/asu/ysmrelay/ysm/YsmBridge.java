@@ -114,6 +114,20 @@ public final class YsmBridge {
         return Optional.of(container.file());
     }
 
+    /** 模型在 YSM 目录里的展示名（容器元数据里的 name），没有就返回空。 */
+    public static java.util.Optional<String> displayName(Hash256 modelId) {
+        var catalog = serverCatalog().orElse(null);
+        if (catalog == null) {
+            return java.util.Optional.empty();
+        }
+        var record = catalog.catalog().byModelId().get(modelId);
+        if (record == null) {
+            return java.util.Optional.empty();
+        }
+        var name = record.entry().presentation().displayName();
+        return name == null || name.isBlank() ? java.util.Optional.empty() : java.util.Optional.of(name);
+    }
+
     /** 模型展示路径（root:相对路径），用于管理面列表。 */
     public static Optional<String> displayPath(Hash256 modelId) {
         return serverCatalog().flatMap(catalog -> catalog.find(modelId))

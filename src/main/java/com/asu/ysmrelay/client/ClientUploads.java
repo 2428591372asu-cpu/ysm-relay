@@ -493,6 +493,6 @@ public final class ClientUploads {
     }
 
     private static String mibPerSecond(int bytesPerSecond) {
-        return String.format("%.1f MiB/s", bytesPerSecond / (1024.0 * 1024.0));
+        return String.format("%.1f MB/s", bytesPerSecond / (1024.0 * 1024.0));
     }
 }

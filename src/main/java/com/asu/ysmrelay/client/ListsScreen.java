@@ -182,7 +182,7 @@ public final class ListsScreen extends Screen {
     }
 
     private static String miB(long bytes) {
-        return String.format(Locale.ROOT, "%.1f MiB", bytes / (1024.0 * 1024.0));
+        return String.format(Locale.ROOT, "%.1f MB", bytes / (1024.0 * 1024.0));
     }
 
     @Override

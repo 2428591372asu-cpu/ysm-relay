@@ -143,7 +143,9 @@ public final class UploadService {
         // 白名单玩家：免审核、免个人配额、免权限等级；资源类守卫（总闸、拉黑、体积、总量）照样成立。
         var whitelisted = RelayPermissions.isUploadWhitelisted(player);
         var requiredLevel = RelayConfig.UPLOAD_PERMISSION_LEVEL.get();
-        if (!whitelisted && requiredLevel > 0 && !player.hasPermissions(requiredLevel)) {
+        // 用模组三级，不再混用原版 op 等级。
+        if (!whitelisted && requiredLevel > 0
+            && RelayPermissions.effectiveLevel(player) < requiredLevel) {
             reply(player, ProbeReply.denied(UploadResult.REJECTED_POLICY, "你没有上传模型的权限"));
             return;
         }
@@ -163,7 +165,7 @@ public final class UploadService {
         var limit = RelayConfig.maxModelBytes();
         if (limit > 0L && probe.size > limit) {
             reply(player, ProbeReply.denied(UploadResult.REJECTED_QUOTA,
-                "模型超过上限 " + (limit / (1024L * 1024L)) + " MiB"));
+                "模型超过上限 " + (limit / (1024L * 1024L)) + " MB"));
             return;
         }
 
@@ -987,9 +989,9 @@ public final class UploadService {
         }
     }
 
-    /** 把字节数格式化成给人看的 MiB。只用于提示文本，不参与任何配额判定。 */
+    /** 把字节数格式化成给人看的 MB。只用于提示文本，不参与任何配额判定。 */
     private static String mib(long bytes) {
-        return String.format(Locale.ROOT, "%.1f MiB", bytes / (1024.0 * 1024.0));
+        return String.format(Locale.ROOT, "%.1f MB", bytes / (1024.0 * 1024.0));
     }
 
     private static String extensionOf(String fileName) {

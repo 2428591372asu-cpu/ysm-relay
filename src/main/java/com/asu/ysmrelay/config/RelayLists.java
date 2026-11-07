@@ -18,6 +18,39 @@ import net.minecraft.server.level.ServerPlayer;
 public final class RelayLists {
     private RelayLists() {}
 
+    /**
+     * 待审列表里把上传者拼在模型名前，服主一眼能看出是谁传的。
+     *
+     * <p>只改展示字符串，{@code extra} 仍然是 reviewId —— 批准/拒绝按钮用的是它，
+     * 不受这个前缀影响。
+     */
+    private static String withUploader(PendingQueue.Entry entry) {
+        var uploader = entry.uploaderName();
+        if (uploader == null || uploader.isBlank()) {
+            return entry.fileName();
+        }
+        return uploader + " · " + entry.fileName();
+    }
+
+    /** 目录里所有非驻留模型，按「本地优先、再按上传者、再按名字」排好。 */
+    private static java.util.List<java.util.Map.Entry<com.elfmcys.ysm.model.domain.Hash256, java.nio.file.Path>>
+        managedModelIds() {
+        var list = new java.util.ArrayList<>(com.asu.ysmrelay.ysm.YsmBridge.serverFiles().entrySet());
+        list.sort((left, right) -> {
+            var leftUploader = UploadRegistry.get().find(left.getKey())
+                .map(UploadRegistry.Entry::uploaderName).orElse("");
+            var rightUploader = UploadRegistry.get().find(right.getKey())
+                .map(UploadRegistry.Entry::uploaderName).orElse("");
+            var byUploader = leftUploader.compareToIgnoreCase(rightUploader);
+            if (byUploader != 0) {
+                return byUploader;
+            }
+            return left.getValue().getFileName().toString()
+                .compareToIgnoreCase(right.getValue().getFileName().toString());
+        });
+        return list;
+    }
+
     /** 单条的大致字节数：哈希 64 + 文件名 UTF-16 + 编号 + 长度前缀。 */
     private static int estimate(String fileName) {
         return 64 + (fileName == null ? 0 : fileName.length() * 2) + 8 + 8 + 12;
@@ -52,6 +85,31 @@ public final class RelayLists {
                 entries.add(new DataReply.Entry(entry.modelId(), entry.fileName(), entry.size(),
                     entry.reviewId()));
             }
+        } else if (kind == DataRequest.KIND_MANAGED) {
+            if (RelayPermissions.canManage(player)) {
+                for (var entry : managedModelIds()) {
+                    var uploader = UploadRegistry.get().find(entry.getKey())
+                        .map(UploadRegistry.Entry::uploaderName).orElse("");
+                    var label = com.asu.ysmrelay.ysm.YsmBridge.displayName(entry.getKey())
+                        .orElseGet(() -> UploadRegistry.get().find(entry.getKey())
+                            .map(UploadRegistry.Entry::fileName)
+                            .filter(name -> !name.isBlank())
+                            .orElseGet(() -> com.asu.ysmrelay.ysm.YsmBridge.displayPath(entry.getKey())
+                                .map(path -> path.substring(path.lastIndexOf('/') + 1))
+                                .orElse("模型 " + entry.getKey().toString().substring(0, 8))));
+                    budget -= estimate(label);
+                    if (entries.size() >= limit || budget <= 0) {
+                        break;
+                    }
+                    long size = 0L;
+                    try {
+                        size = java.nio.file.Files.size(entry.getValue());
+                    } catch (java.io.IOException ignored) {
+                        // 文件刚好被删掉，按 0 报
+                    }
+                    entries.add(new DataReply.Entry(entry.getKey().toString(), label, size, uploader));
+                }
+            }
         } else if (kind == DataRequest.KIND_PENDING) {
             if (RelayPermissions.canApprove(player)) {
                 for (var entry : PendingQueue.get().list()) {
@@ -59,7 +117,7 @@ public final class RelayLists {
                     if (entries.size() >= limit || budget <= 0) {
                         break;
                     }
-                    entries.add(new DataReply.Entry(entry.modelId(), entry.fileName(), entry.size(),
+                    entries.add(new DataReply.Entry(entry.modelId(), withUploader(entry), entry.size(),
                         entry.reviewId()));
                 }
             }

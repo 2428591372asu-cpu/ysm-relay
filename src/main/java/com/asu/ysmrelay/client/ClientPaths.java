@@ -19,6 +19,7 @@ import org.slf4j.LoggerFactory;
 public final class ClientPaths {
     private static final Logger LOGGER = LoggerFactory.getLogger("ysm_relay");
     private static final String KEY = "manualUploadFolder";
+    private static final String KEY_SKIP_DELETE_CONFIRM = "skipDeleteConfirm";
 
     private ClientPaths() {}
 
@@ -59,9 +60,24 @@ public final class ClientPaths {
         return !load().getProperty(KEY, "").trim().isEmpty();
     }
 
+    /** 删除模型时是否跳过确认框。 */
+    public static boolean skipDeleteConfirm() {
+        return Boolean.parseBoolean(load().getProperty(KEY_SKIP_DELETE_CONFIRM, "false"));
+    }
+
+    public static void setSkipDeleteConfirm(boolean skip) {
+        var properties = load();
+        properties.setProperty(KEY_SKIP_DELETE_CONFIRM, Boolean.toString(skip));
+        save(properties);
+    }
+
     public static void setManualFolder(Path folder) {
         var properties = load();
         properties.setProperty(KEY, folder == null ? "" : folder.toAbsolutePath().toString());
+        save(properties);
+    }
+
+    private static void save(Properties properties) {
         var file = configFile();
         try {
             Files.createDirectories(file.getParent());
@@ -71,7 +87,7 @@ public final class ClientPaths {
             }
             Files.move(temporary, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException failure) {
-            LOGGER.warn("[ysm-relay] 写入客户端目录设置失败", failure);
+            LOGGER.warn("[ysm-relay] 写入客户端设置失败", failure);
         }
     }
 }

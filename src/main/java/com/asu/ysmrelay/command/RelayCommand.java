@@ -62,6 +62,67 @@ public final class RelayCommand {
      * 命令方块会被挡在外面——它的命令源没有实体，但文本名不是 {@code Server}，
      * 而是方块自己的名字（默认 {@code !}）。
      */
+    /**
+     * 命令根门槛：服主源，或等级够跑审批/管理任一类的玩家。
+     *
+     * <p>不写死 {@code hasPermission(2)}：那样只有原版 op 能用，把「权限组」成员挡在外面，
+     * 而设置页又允许他们点管理。具体子命令再各自按等级收口。
+     */
+    private static boolean canUseRoot(CommandSourceStack source) {
+        if (isRealOwnerSource(source)) {
+            return true;
+        }
+        if (source.getEntity() instanceof ServerPlayer player) {
+            return RelayPermissions.canManage(player) || RelayPermissions.canApprove(player);
+        }
+        // 命令方块等非玩家源：一律不给
+        return false;
+    }
+
+    /** 管理类子命令的门槛。 */
+    private static boolean manageSource(CommandSourceStack source) {
+        if (isRealOwnerSource(source)) {
+            return true;
+        }
+        return source.getEntity() instanceof ServerPlayer player && RelayPermissions.canManage(player);
+    }
+
+    /** 审批类子命令的门槛（控制台永远放行）。 */
+    private static boolean approveSource(CommandSourceStack source) {
+        if (isRealOwnerSource(source)) {
+            return true;
+        }
+        return source.getEntity() instanceof ServerPlayer player && RelayPermissions.canApprove(player);
+    }
+
+    /** 处理函数里再兜一次底：requires 只影响命令是否可见，不替执行路径担保。 */
+    private static boolean requireManage(CommandContext<CommandSourceStack> context) {
+        if (manageSource(context.getSource())) {
+            return true;
+        }
+        context.getSource().sendFailure(Component.literal(
+            "[ysm-relay] 权限不足：需要等级 " + RelayConfig.levelOf("manageRights") + "（管理模型）"));
+        return false;
+    }
+
+    /** 等级分发的门槛：服主源，或 3 级玩家。2 级不能分发权限。 */
+    private static boolean distributorSource(CommandSourceStack source) {
+        if (isRealOwnerSource(source)) {
+            return true;
+        }
+        return source.getEntity() instanceof ServerPlayer player
+            && RelayPermissions.canDistributeLevels(player);
+    }
+
+    /** 分发者自己的等级；控制台按 4（最高）算。 */
+    private static int distributorLevel(CommandSourceStack source) {
+        if (isRealOwnerSource(source)) {
+            return 4;
+        }
+        return source.getEntity() instanceof ServerPlayer player
+            ? RelayPermissions.effectiveLevel(player) : 0;
+    }
+
     private static boolean isRealOwnerSource(CommandSourceStack source) {
         if (source.getEntity() instanceof ServerPlayer player) {
             return RelayPermissions.isHost(player);
@@ -74,8 +135,19 @@ public final class RelayCommand {
     }
 
     private static int levelGrant(CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
+        if (!distributorSource(context.getSource())) {
+            context.getSource().sendFailure(Component.literal("[ysm-relay] 只有服主或 3 级玩家能分发等级"));
+            return 0;
+        }
         var target = EntityArgument.getPlayer(context, TARGETS);
         var level = IntegerArgumentType.getInteger(context, "level");
+        // 不能授予比自己更高的等级：3 级最多给到 3 级，防止越级提权。
+        var mine = distributorLevel(context.getSource());
+        if (level > mine) {
+            context.getSource().sendFailure(Component.literal(
+                "[ysm-relay] 你最多只能授予 " + mine + " 级"));
+            return 0;
+        }
         var uuid = target.getUUID().toString().toLowerCase(Locale.ROOT);
         var next = RelayConfig.levelGrants();
         next.removeIf(entry -> entry.startsWith(uuid + ":"));
@@ -87,6 +159,10 @@ public final class RelayCommand {
     }
 
     private static int levelRevoke(CommandContext<CommandSourceStack> context) {
+        if (!distributorSource(context.getSource())) {
+            context.getSource().sendFailure(Component.literal("[ysm-relay] 只有服主或 3 级玩家能撤销等级"));
+            return 0;
+        }
         var uuid = StringArgumentType.getString(context, "uuid").trim().toLowerCase(Locale.ROOT);
         var next = RelayConfig.levelGrants();
         var removed = next.removeIf(entry -> entry.startsWith(uuid + ":"));
@@ -202,10 +278,10 @@ public final class RelayCommand {
             var dir = com.asu.ysmrelay.upload.PendingQueue.directoryOf(entry.reviewId());
             var path = dir.resolve(entry.fileName()).toAbsolutePath();
             var shortId = entry.modelId().substring(0, 12);
-            var sizeMiB = entry.size() / (1024.0 * 1024.0);
+            var sizeMB = entry.size() / (1024.0 * 1024.0);
             context.getSource().sendSuccess(() -> Component.literal(
                 "  " + entry.reviewId() + "  " + entry.uploaderName() + "  " + entry.fileName()
-                    + String.format(Locale.ROOT, "  %.2f MiB  ", sizeMiB) + shortId), false);
+                    + String.format(Locale.ROOT, "  %.2f MB  ", sizeMB) + shortId), false);
         }
         context.getSource().sendSuccess(() -> Component.literal(
             "[ysm-relay] 批准 /ysmrelay approve <review>，拒绝 /ysmrelay reject <review>"), false);
@@ -305,9 +381,9 @@ public final class RelayCommand {
         for (var index = 0; index < limit; index++) {
             var entry = entries.get(index);
             var shortId = entry.modelId().substring(0, 12);
-            var sizeMiB = entry.size() / (1024.0 * 1024.0);
+            var sizeMB = entry.size() / (1024.0 * 1024.0);
             source.sendSuccess(() -> Component.literal("  " + shortId + "  " + entry.fileName()
-                + String.format(Locale.ROOT, "  %.2f MiB", sizeMiB)), false);
+                + String.format(Locale.ROOT, "  %.2f MB", sizeMB)), false);
         }
         if (entries.size() > limit) {
             source.sendSuccess(() -> Component.literal("  …还有 " + (entries.size() - limit) + " 条未显示"), false);
@@ -370,22 +446,23 @@ public final class RelayCommand {
     }
 
     private static LiteralArgumentBuilder<CommandSourceStack> build() {
-        var root = Commands.literal("ysmrelay").requires(source -> source.hasPermission(2));
+        var root = Commands.literal("ysmrelay").requires(RelayCommand::canUseRoot);
 
-        root.then(Commands.literal("status").executes(RelayCommand::status));
+        root.then(Commands.literal("status").requires(RelayCommand::manageSource).executes(RelayCommand::status));
 
-        var list = Commands.literal("list");
+        var list = Commands.literal("list").requires(RelayCommand::manageSource);
         list.executes(context -> list(context, 1));
         list.then(Commands.argument("page", com.mojang.brigadier.arguments.IntegerArgumentType.integer(1))
             .executes(context -> list(context,
                 com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "page"))));
         root.then(list);
 
-        root.then(Commands.literal("show")
+        root.then(Commands.literal("show").requires(RelayCommand::manageSource)
             .then(Commands.argument(TARGETS, EntityArgument.player()).executes(RelayCommand::show)));
 
         // 同一个 argument 节点只能出现一次：Brigadier 的子节点表按 name 索引，重复 then 会覆盖前一支。
-        var policy = Commands.literal("policy").then(Commands.argument(MODEL, StringArgumentType.word())
+        var policy = Commands.literal("policy").requires(RelayCommand::manageSource)
+            .then(Commands.argument(MODEL, StringArgumentType.word())
             .then(Commands.literal("public").executes(context -> policy(context, AuthAdmin.Mode.PUBLIC, List.of())))
             .then(Commands.literal("listed").then(Commands.argument(TARGETS, EntityArgument.players())
                 .executes(context -> policy(context, AuthAdmin.Mode.LISTED, online(context)))))
@@ -394,29 +471,33 @@ public final class RelayCommand {
             .then(Commands.literal("clear").executes(RelayCommand::clearPolicy)));
         root.then(policy);
 
-        root.then(Commands.literal("grant").then(Commands.argument(TARGETS, EntityArgument.player())
+        root.then(Commands.literal("grant").requires(RelayCommand::manageSource)
+            .then(Commands.argument(TARGETS, EntityArgument.player())
             .then(Commands.argument(MODEL, StringArgumentType.word())
                 .executes(context -> grant(context, true)))));
-        root.then(Commands.literal("revoke").then(Commands.argument(TARGETS, EntityArgument.player())
+        root.then(Commands.literal("revoke").requires(RelayCommand::manageSource)
+            .then(Commands.argument(TARGETS, EntityArgument.player())
             .then(Commands.argument(MODEL, StringArgumentType.word())
                 .executes(context -> grant(context, false)))));
 
-        root.then(Commands.literal("move").then(Commands.argument(MODEL, StringArgumentType.word())
+        root.then(Commands.literal("move").requires(RelayCommand::manageSource)
+            .then(Commands.argument(MODEL, StringArgumentType.word())
             .then(Commands.literal("auth").executes(context -> move(context, ModelPlacement.Root.AUTH)))
             .then(Commands.literal("custom").executes(context -> move(context, ModelPlacement.Root.CUSTOM)))));
 
         // 删除是不可逆的，所以要求再打一次 confirm。
-        root.then(Commands.literal("delete").then(Commands.argument(MODEL, StringArgumentType.word())
+        root.then(Commands.literal("delete").requires(RelayCommand::manageSource)
+            .then(Commands.argument(MODEL, StringArgumentType.word())
             .then(Commands.literal("confirm").executes(RelayCommand::delete))));
 
-        root.then(Commands.literal("block").then(Commands.argument(MODEL, StringArgumentType.word())
+        root.then(Commands.literal("block").requires(RelayCommand::manageSource)
+            .then(Commands.argument(MODEL, StringArgumentType.word())
             .executes(RelayCommand::block)));
-        root.then(Commands.literal("unblock").then(Commands.argument(MODEL, StringArgumentType.word())
+        root.then(Commands.literal("unblock").requires(RelayCommand::manageSource)
+            .then(Commands.argument(MODEL, StringArgumentType.word())
             .executes(RelayCommand::unblock)));
 
-        var blockUploader = Commands.literal("blockuploader")
-            .requires(source -> !(source.getEntity() instanceof ServerPlayer player)
-                || RelayPermissions.canBlockUploader(player));
+        var blockUploader = Commands.literal("blockuploader").requires(RelayCommand::manageSource);
         blockUploader.then(Commands.literal("add")
             .then(Commands.argument(TARGETS, EntityArgument.player()).executes(RelayCommand::blockUploaderAdd)));
         blockUploader.then(Commands.literal("remove")
@@ -425,9 +506,7 @@ public final class RelayCommand {
         root.then(blockUploader);
 
         // 上传白名单：名单内玩家免审核、免个人配额。
-        var whitelist = Commands.literal("whitelist")
-            .requires(source -> !(source.getEntity() instanceof ServerPlayer player)
-                || RelayPermissions.canBlockUploader(player));
+        var whitelist = Commands.literal("whitelist").requires(RelayCommand::manageSource);
         whitelist.then(Commands.literal("add")
             .then(Commands.argument(TARGETS, EntityArgument.player()).executes(RelayCommand::whitelistAdd)));
         whitelist.then(Commands.literal("remove")
@@ -437,7 +516,7 @@ public final class RelayCommand {
 
         // 等级授予：只有服主能加/撤。
         var level = Commands.literal("level")
-            .requires(RelayCommand::isRealOwnerSource);
+            .requires(RelayCommand::distributorSource);
         level.then(Commands.literal("grant")
             .then(Commands.argument(TARGETS, EntityArgument.player())
                 .then(Commands.argument("level", IntegerArgumentType.integer(1, 3))
@@ -448,27 +527,21 @@ public final class RelayCommand {
         root.then(level);
 
         // 审批面：只有服主或权限组成员能看/能批。
-        var pending = Commands.literal("pending")
-            .requires(source -> !(source.getEntity() instanceof ServerPlayer player)
-                || RelayPermissions.canApprove(player))
+        var pending = Commands.literal("pending").requires(RelayCommand::approveSource)
             .executes(RelayCommand::pendingList);
         root.then(pending);
 
-        var approve = Commands.literal("approve")
-            .requires(source -> !(source.getEntity() instanceof ServerPlayer player)
-                || RelayPermissions.canApprove(player))
+        var approve = Commands.literal("approve").requires(RelayCommand::approveSource)
             .then(Commands.argument("review", StringArgumentType.word()).executes(RelayCommand::approveReview));
         root.then(approve);
 
-        var reject = Commands.literal("reject")
-            .requires(source -> !(source.getEntity() instanceof ServerPlayer player)
-                || RelayPermissions.canApprove(player))
+        var reject = Commands.literal("reject").requires(RelayCommand::approveSource)
             .then(Commands.argument("review", StringArgumentType.word()).executes(RelayCommand::rejectReview));
         root.then(reject);
 
-        root.then(Commands.literal("paths").executes(RelayCommand::printPaths));
+        root.then(Commands.literal("paths").requires(RelayCommand::manageSource).executes(RelayCommand::printPaths));
 
-        root.then(Commands.literal("refresh").executes(RelayCommand::refreshAll)
+        root.then(Commands.literal("refresh").requires(RelayCommand::manageSource).executes(RelayCommand::refreshAll)
             .then(Commands.argument(TARGETS, EntityArgument.player()).executes(RelayCommand::refreshOne)));
 
         return root;
@@ -584,6 +657,9 @@ public final class RelayCommand {
 
     private static int policy(CommandContext<CommandSourceStack> context, AuthAdmin.Mode mode,
         Collection<ServerPlayer> targets) {
+        if (!requireManage(context)) {
+            return 0;
+        }
         var source = context.getSource();
         var resolved = resolveModel(StringArgumentType.getString(context, MODEL));
         if (resolved.error() != null) {
@@ -624,6 +700,9 @@ public final class RelayCommand {
     }
 
     private static int clearPolicy(CommandContext<CommandSourceStack> context) {
+        if (!requireManage(context)) {
+            return 0;
+        }
         var source = context.getSource();
         var resolved = resolveModel(StringArgumentType.getString(context, MODEL));
         if (resolved.error() != null) {
@@ -638,6 +717,9 @@ public final class RelayCommand {
 
     private static int grant(CommandContext<CommandSourceStack> context, boolean adding)
         throws CommandSyntaxException {
+        if (!requireManage(context)) {
+            return 0;
+        }
         var source = context.getSource();
         var player = EntityArgument.getPlayer(context, TARGETS);
         var resolved = resolveModel(StringArgumentType.getString(context, MODEL));
@@ -672,6 +754,9 @@ public final class RelayCommand {
     }
 
     private static int move(CommandContext<CommandSourceStack> context, ModelPlacement.Root target) {
+        if (!requireManage(context)) {
+            return 0;
+        }
         var source = context.getSource();
         var resolved = resolveModel(StringArgumentType.getString(context, MODEL));
         if (resolved.error() != null) {
@@ -689,6 +774,9 @@ public final class RelayCommand {
     }
 
     private static int delete(CommandContext<CommandSourceStack> context) {
+        if (!requireManage(context)) {
+            return 0;
+        }
         var source = context.getSource();
         var resolved = resolveModel(StringArgumentType.getString(context, MODEL));
         if (resolved.error() != null) {
@@ -716,6 +804,9 @@ public final class RelayCommand {
     }
 
     private static int block(CommandContext<CommandSourceStack> context) {
+        if (!requireManage(context)) {
+            return 0;
+        }
         var source = context.getSource();
         var resolved = resolveModel(StringArgumentType.getString(context, MODEL));
         if (resolved.error() != null) {
@@ -730,6 +821,9 @@ public final class RelayCommand {
     }
 
     private static int unblock(CommandContext<CommandSourceStack> context) {
+        if (!requireManage(context)) {
+            return 0;
+        }
         var source = context.getSource();
         // 被删除的模型已经不在 catalog 里，resolveModel 找不到它，所以这里允许直接给完整哈希。
         var token = StringArgumentType.getString(context, MODEL).trim().toLowerCase(Locale.ROOT);

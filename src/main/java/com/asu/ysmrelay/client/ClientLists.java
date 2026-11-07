@@ -11,6 +11,7 @@ public final class ClientLists {
     private static volatile List<DataReply.Entry> mine = List.of();
     private static volatile List<DataReply.Entry> pending = List.of();
     private static volatile List<DataReply.Entry> myPending = List.of();
+    private static volatile List<DataReply.Entry> managed = List.of();
 
     private ClientLists() {}
 
@@ -25,6 +26,9 @@ public final class ClientLists {
             mine = List.copyOf(message.entries);
         } else if (message.kind == com.asu.ysmrelay.net.msg.DataRequest.KIND_MY_PENDING) {
             myPending = List.copyOf(message.entries);
+        } else if (message.kind == com.asu.ysmrelay.net.msg.DataRequest.KIND_MANAGED) {
+            managed = List.copyOf(message.entries);
+            ModelManagerScreen.onData();
         } else {
             pending = List.copyOf(message.entries);
         }
@@ -43,9 +47,14 @@ public final class ClientLists {
         return myPending;
     }
 
+    public static List<DataReply.Entry> managed() {
+        return managed;
+    }
+
     public static void clear() {
         mine = List.of();
         pending = List.of();
         myPending = List.of();
+        managed = List.of();
     }
 }

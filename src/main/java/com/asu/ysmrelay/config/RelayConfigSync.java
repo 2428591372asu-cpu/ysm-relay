@@ -63,6 +63,11 @@ public final class RelayConfigSync {
      *
      * <p>整批校验：任何一键不合法就整批拒绝，不做部分生效——半套配置比没改更难排查。
      */
+    /** 决定「谁能干什么」的配置，只有服主能改。 */
+    private static final java.util.Set<String> PERMISSION_KEYS = java.util.Set.of(
+        "approveUploads", "manageRights", "blockUploaders", "uploadWhitelist",
+        "groupManage", "uploadPermissionLevel");
+
     public static void apply(ServerPlayer player, ConfigUpdate update) {
         var level = RelayPermissions.effectiveLevel(player);
         // 逐项按各自等级校验；一项不够就整批拒绝。
@@ -70,6 +75,11 @@ public final class RelayConfigSync {
             var option = optionOf(key);
             if (option == null || level < RelayConfig.levelOf(option)) {
                 actionBar(player, "等级不足，无法修改 " + key);
+                return;
+            }
+            // 权限定义类配置要求 3 级（与服主同权）。2 级不能改，防止把自己的门槛调低自我提权。
+            if (PERMISSION_KEYS.contains(option) && level < 3) {
+                actionBar(player, "只有 3 级或服主能修改权限相关配置：" + key);
                 return;
             }
         }

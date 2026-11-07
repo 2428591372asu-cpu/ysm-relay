@@ -9,6 +9,8 @@ public final class DataRequest {
     public static final int KIND_MINE = 0;
     public static final int KIND_PENDING = 1;
     public static final int KIND_MY_PENDING = 2;
+    /** 服主「模型管理」列表：目录里所有模型 + 上传者。 */
+    public static final int KIND_MANAGED = 3;
 
     public final int kind;
 

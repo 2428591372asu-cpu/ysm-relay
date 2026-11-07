@@ -128,16 +128,50 @@ public final class RelayConfig {
     /** 被拉黑的玩家（UUID）：服务端不接收这些人上传的模型。 */
     public static final ForgeConfigSpec.ConfigValue<List<? extends String>> BLOCKED_UPLOADERS;
 
-    /** 可以处理上传请求的玩家（UUID）。空表时只有服主（权限 4）能处理。 */
+    /** 审批组成员（UUID）：2 级，可审批待审队列。 */
     public static final ForgeConfigSpec.ConfigValue<List<? extends String>> APPROVE_GROUP;
-    /** 可以管理模型使用权的玩家（UUID）。空表时只有服主（权限 4）能管理。 */
+    /** 管理组成员（UUID）：2 级，可管理模型与上传名单。 */
     public static final ForgeConfigSpec.ConfigValue<List<? extends String>> MANAGE_GROUP;
 
 
 
     static {
         var builder = new ForgeConfigSpec.Builder();
-        builder.comment("YSM Relay upload settings").push("upload");
+        builder.comment(
+            "===== YSM Relay 权限模型 =====",
+            "",
+            "三级权限，数字越大越高。等级由服务端每次现算，不缓存。",
+            "",
+            "1 级（所有玩家）：",
+            "  - 上传模型（还受 allowPlayerUpload / uploadPermissionLevel / 配额限制）",
+            "  - 查看、删除、撤回「自己上传」的模型（/relayme list / delete / cancel）",
+            "  - 看不到设置页的管理项，也不能执行 /ysmrelay",
+            "",
+            "2 级（模型管理员）：op（原版权限 2）、approveGroup 或 manageGroup 组员、",
+            "  或服主用 /ysmrelay level grant 授予。可以：",
+            "  - 审批待审队列（/ysmrelay pending / approve / reject）",
+            "  - 删除、搬迁、授权模型（/ysmrelay delete / move / policy / grant / revoke）",
+            "  - 管理上传名单（/ysmrelay blockuploader / whitelist）",
+            "  - 在设置页修改标记为 2 级的配置项",
+            "  不能：分发等级、修改权限定义类配置",
+            "",
+            "3 级（服主信任的人）：只有服主能授予。等同于服主的权限，拥有 2 级的全部能力，另外可以：",
+            "  - /ysmrelay level grant|revoke 分发 1–3 级（不能授予高于自己的等级）",
+            "  - 修改所有配置项，包括权限定义类配置",
+            "",
+            "服主（专用服务器控制台 / LAN 房主）：不依赖任何配置，等同于 3 级。",
+            "  3 级与服主权限相同；区别只在于服主身份来自控制台/主机，不占 levelGrants 名单。",
+            "",
+            "授予与撤销：",
+            "  /ysmrelay level grant <玩家> <1-3>",
+            "  /ysmrelay level revoke <uuid>",
+            "  /ysmrelay level list",
+            "",
+            "各配置项「至少需要几级才能改」在 [permissions] 段登记；",
+            "「哪个组能做什么」由 approveGroup / manageGroup 决定（组员一律 2 级）。",
+            "",
+            "YSM Relay upload settings")
+            .push("upload");
 
         ALLOW_PLAYER_UPLOAD = builder
             .comment("Allow ordinary players to upload model files to this server.")
@@ -168,8 +202,11 @@ public final class RelayConfig {
             .defineInRange("stagingTtlSeconds", 600, 30, 86400);
 
         UPLOAD_PERMISSION_LEVEL = builder
-            .comment("Required permission level for uploading. 0 means any player.")
-            .defineInRange("uploadPermissionLevel", 0, 0, 4);
+            .comment("Required YSM Relay level to upload.",
+                "0 = everyone (subject to allowPlayerUpload), 1 = level-1 players and above,",
+                "2 = model admins only, 3 = trusted (owner-granted) only.",
+                "Whitelisted players always skip this check.")
+            .defineInRange("uploadPermissionLevel", 0, 0, 3);
 
         TARGET_ROOT = builder
             .comment("Which catalog root uploads land in: 'custom' (public) or 'auth' (grant only).")
@@ -278,20 +315,28 @@ public final class RelayConfig {
             .defineInRange("autoUploadScanSeconds", 0, 0, 3600);
 
         APPROVE_GROUP = builder
-            .comment("UUIDs allowed to handle upload requests.",
-                "Empty falls back to approvePermissionLevel (default 2, i.e. operators).")
+            .comment("UUIDs of level-2 model admins (approval side).",
+                "Members can review/approve/reject pending uploads.",
+                "Operators (vanilla permission level 2) always count as level 2, even with both lists empty.",
+                "Only the owner can change this list; members cannot add anyone, including themselves.")
             .defineList("approveGroup", List.of(), value -> value instanceof String text && text.length() == 36);
 
         MANAGE_GROUP = builder
-            .comment("UUIDs allowed to change which player may use which model.",
-                "Empty falls back to accessPermissionLevel (default 2, i.e. operators).")
+            .comment("UUIDs of level-2 model admins (management side).",
+                "Members can delete/move/authorize models and manage upload lists.",
+                "Operators (vanilla permission level 2) always count as level 2, even with both lists empty.",
+                "Only the owner can change this list; members cannot add anyone, including themselves.")
             .defineList("manageGroup", List.of(), value -> value instanceof String text && text.length() == 36);
 
         builder.pop();
 
-        builder.comment("Required user level for each option.",
-            "1 = every player, 2 = permission groups and operators, 3 = owner.",
-            "Levels can be granted manually with /ysmrelay level grant <player> <1-3>.")
+        builder.comment(
+            "===== 每个配置项「至少需要几级」才能修改 =====",
+            "1 = 所有玩家；2 = 模型管理员（op / 两个组的组员 / 被授予 2 级）；3 = 服主信任的人（被授予 3 级）。",
+            "注意：这里只是「改配置」的门槛，不是「能做什么」的定义。",
+            "能做什么见文件顶部的权限模型说明。",
+            "权限定义类键（approveUploads / manageRights / blockUploaders / uploadWhitelist /",
+            "groupManage / uploadPermissionLevel）要求 3 级（与服主同权）。")
             .push("permissions");
         option(builder, "allowPlayerUpload", 3);
         option(builder, "rejectAllUploads", 3);
@@ -301,16 +346,16 @@ public final class RelayConfig {
         option(builder, "autoSync", 3);
         option(builder, "autoSyncMinIntervalSeconds", 3);
         option(builder, "autoUploadScanSeconds", 3);
-        option(builder, "maxPendingCount", 2);
+        option(builder, "maxPendingCount", 3);
         option(builder, "maxPendingPerPlayer", 3);
         option(builder, "maxModelBytes", 3);
-        option(builder, "maxBytesPerPlayer", 2);
-        option(builder, "maxTotalBytes", 2);
+        option(builder, "maxBytesPerPlayer", 3);
+        option(builder, "maxTotalBytes", 3);
         option(builder, "uploadPermissionLevel", 3);
-        option(builder, "approveUploads", 2);
-        option(builder, "manageRights", 2);
-        option(builder, "blockUploaders", 2);
-        option(builder, "uploadWhitelist", 2);
+        option(builder, "approveUploads", 3);
+        option(builder, "manageRights", 3);
+        option(builder, "blockUploaders", 3);
+        option(builder, "uploadWhitelist", 3);
         option(builder, "groupManage", 3);
         option(builder, "listMaxEntries", 3);
         LEVEL_GRANTS = builder
@@ -326,7 +371,8 @@ public final class RelayConfig {
 
     private static void option(ForgeConfigSpec.Builder builder, String name, int defaultLevel) {
         OPTION_LEVELS.put(name,
-            builder.comment("Required level for " + name).defineInRange(name, defaultLevel, 1, 3));
+            builder.comment("Required level to edit " + name + " (1 player / 2 model admin / 3 trusted).")
+                .defineInRange(name, defaultLevel, 1, 3));
     }
 
     /** 某个选项需要的等级；没登记的按只有服主可用处理。 */
