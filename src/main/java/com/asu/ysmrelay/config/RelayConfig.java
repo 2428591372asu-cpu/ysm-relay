@@ -142,6 +142,11 @@ public final class RelayConfig {
             "",
             "三级权限，数字越大越高。等级由服务端每次现算，不缓存。",
             "",
+            "0 级（被禁用）：显式授予 0 级后，不能用本模组的任何功能——",
+            "  上传被拒、/relayme 不可用、界面入口提示已禁用。优先级最高，白名单也盖不过它。",
+            "  3 级可以向任何人授 0 级（包括另一个 3 级与房主），这是刻意保留的：",
+            "  原版默认 op-permission-level=4，op 之间本来就能互相 /deop，不在这里加额外限制。",
+            "",
             "1 级（所有玩家）：",
             "  - 上传模型（还受 allowPlayerUpload / uploadPermissionLevel / 配额限制）",
             "  - 查看、删除、撤回「自己上传」的模型（/relayme list / delete / cancel）",
@@ -163,7 +168,7 @@ public final class RelayConfig {
             "  3 级与服主权限相同；区别只在于服主身份来自控制台/主机，不占 levelGrants 名单。",
             "",
             "授予与撤销：",
-            "  /ysmrelay level grant <玩家> <1-3>",
+            "  /ysmrelay level grant <玩家> <0-3>",
             "  /ysmrelay level revoke <uuid>",
             "  /ysmrelay level list",
             "",
@@ -359,7 +364,8 @@ public final class RelayConfig {
         option(builder, "groupManage", 3);
         option(builder, "listMaxEntries", 3);
         LEVEL_GRANTS = builder
-            .comment("Manual level grants, one entry per player, formatted <uuid>:<level>.")
+            .comment("Manual level grants, one entry per player, formatted <uuid>:<level>.",
+                "Level 0 disables every relay feature for that player (overrides op/host).")
             .defineList("levelGrants", List.of(),
                 value -> value instanceof String text && text.contains(":") && text.length() <= 80);
         builder.pop();
@@ -390,12 +396,12 @@ public final class RelayConfig {
         return result;
     }
 
-    /** 手动授予的等级（uuid → 等级，取最高）。 */
+    /** 手动授予的等级（uuid → 等级，取最高）；没有任何授予时返回 -1。 */
     public static int grantedLevel(String uuid) {
         if (uuid == null || uuid.isEmpty()) {
-            return 0;
+            return -1;
         }
-        var best = 0;
+        var best = -1;
         for (var raw : LEVEL_GRANTS.get()) {
             if (raw == null) {
                 continue;

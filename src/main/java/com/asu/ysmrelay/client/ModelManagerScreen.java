@@ -14,20 +14,20 @@ import net.minecraft.network.chat.Component;
 import org.jetbrains.annotations.Nullable;
 
 /**
- * 「模型管理」目录页。
+ * 「模型管理」目录页，两个分页：模型列表 / 拉黑名单。
  *
- * <p>一行一个模型，三列：上传的玩家、模型名、大小。名字太长按像素截断并加省略号。
- * 顶部搜索框同时过滤玩家名与模型名；底部翻页与刷新。
- *
- * <p>删除是「两次点击确认」：第一次点变成「确认」，5 秒内再点才真的发命令。
+ * <p>模型列表一行三列（上传的玩家、模型名、大小），右侧「删除」「拉黑」；
+ * 拉黑名单一行显示上传者、模型名、短哈希，右侧「解除」。
+ * 名字太长按像素截断并加省略号；顶部搜索框同时过滤玩家名与模型名。
  */
 public final class ModelManagerScreen extends Screen {
     private static final int ROW_HEIGHT = 22;
     private static final int PAGE_SIZE = 10;
-    private static final long CONFIRM_WINDOW_MS = 5000L;
     private static final int COL_UPLOADER = 110;
-    private static final int COL_SIZE = 78;
-    private static final int DELETE_WIDTH = 46;
+    private static final int COL_SIZE = 70;
+    private static final int BUTTON_WIDTH = 46;
+    private static final int BUTTON_GAP = 4;
+    private static final int ACTION_WIDTH = BUTTON_WIDTH * 2 + BUTTON_GAP;
 
     @Nullable
     private static ModelManagerScreen current;
@@ -38,6 +38,7 @@ public final class ModelManagerScreen extends Screen {
     private final List<Button> rowButtons = new ArrayList<>();
     private int page;
     private int refreshIn;
+    private boolean blockedView;
 
     public ModelManagerScreen(@Nullable Screen parent) {
         super(Component.translatable("screen.ysm_relay.manage.title"));
@@ -54,8 +55,8 @@ public final class ModelManagerScreen extends Screen {
     @Override
     protected void init() {
         current = this;
-        ClientLists.request(DataRequest.KIND_MANAGED);
-        search = new EditBox(font, width / 2 - 230, 40, 250, 20,
+        ClientLists.request(kind());
+        search = new EditBox(font, width / 2 - 230, 40, 200, 20,
             Component.translatable("screen.ysm_relay.manage.search"));
         search.setResponder(text -> {
             page = 0;
@@ -63,12 +64,18 @@ public final class ModelManagerScreen extends Screen {
         });
         addRenderableWidget(search);
         addRenderableWidget(Button
+            .builder(Component.translatable("screen.ysm_relay.manage.tab_models"), button -> switchView(false))
+            .bounds(width / 2 - 24, 40, 76, 20).build());
+        addRenderableWidget(Button
+            .builder(Component.translatable("screen.ysm_relay.manage.tab_blocked"), button -> switchView(true))
+            .bounds(width / 2 + 56, 40, 76, 20).build());
+        addRenderableWidget(Button
             .builder(Component.translatable("screen.ysm_relay.settings.refresh"),
-                button -> ClientLists.request(DataRequest.KIND_MANAGED))
-            .bounds(width / 2 + 30, 40, 80, 20).build());
+                button -> ClientLists.request(kind()))
+            .bounds(width / 2 + 138, 40, 46, 20).build());
         addRenderableWidget(Button
             .builder(Component.translatable("screen.ysm_relay.upload.back"), button -> onClose())
-            .bounds(width / 2 + 116, 40, 60, 20).build());
+            .bounds(width / 2 + 190, 40, 40, 20).build());
         addRenderableWidget(Button.builder(Component.literal("<"), button -> {
             if (page > 0) {
                 page--;
@@ -84,12 +91,23 @@ public final class ModelManagerScreen extends Screen {
         rebuildRows();
     }
 
+    private int kind() {
+        return blockedView ? DataRequest.KIND_BLOCKED : DataRequest.KIND_MANAGED;
+    }
+
+    private void switchView(boolean blocked) {
+        blockedView = blocked;
+        page = 0;
+        ClientLists.request(kind());
+        rebuildRows();
+    }
+
     private List<DataReply.Entry> filtered() {
-        var all = ClientLists.managed();
+        var all = blockedView ? ClientLists.blocked() : ClientLists.managed();
         var query = search == null ? "" : search.getValue().trim().toLowerCase(Locale.ROOT);
         var result = new ArrayList<DataReply.Entry>(all.size());
         for (var entry : all) {
-            var uploader = uploaderOf(entry);
+            var uploader = entry.extra() == null ? "" : entry.extra();
             var name = entry.fileName() == null ? "" : entry.fileName();
             if (query.isEmpty()
                 || name.toLowerCase(Locale.ROOT).contains(query)
@@ -122,32 +140,50 @@ public final class ModelManagerScreen extends Screen {
             var rowY = 70 + (index - start) * ROW_HEIGHT;
             var id = entry.modelId();
             var name = entry.fileName() == null ? "" : entry.fileName();
-            var boundsX = width / 2 + 240 - DELETE_WIDTH;
-            var button = addRenderableWidget(Button
-                .builder(Component.translatable("screen.ysm_relay.manage.delete"),
-                    clicked -> onDelete(id, name))
-                .bounds(boundsX, rowY, DELETE_WIDTH, 20).build());
-            rowButtons.add(button);
+            if (blockedView) {
+                rowButtons.add(addRenderableWidget(Button
+                    .builder(Component.translatable("screen.ysm_relay.manage.unblock"),
+                        clicked -> confirm(id, name, DeleteConfirmScreen.Mode.UNBLOCK))
+                    .bounds(width / 2 + 240 - BUTTON_WIDTH * 2, rowY, BUTTON_WIDTH * 2, 20).build()));
+            } else {
+                var blockX = width / 2 + 240 - BUTTON_WIDTH;
+                var deleteX = blockX - BUTTON_GAP - BUTTON_WIDTH;
+                rowButtons.add(addRenderableWidget(Button
+                    .builder(Component.translatable("screen.ysm_relay.manage.delete"),
+                        clicked -> confirm(id, name, DeleteConfirmScreen.Mode.DELETE))
+                    .bounds(deleteX, rowY, BUTTON_WIDTH, 20).build()));
+                rowButtons.add(addRenderableWidget(Button
+                    .builder(Component.translatable("screen.ysm_relay.manage.block"),
+                        clicked -> confirm(id, name, DeleteConfirmScreen.Mode.DELETE_BLOCK))
+                    .bounds(blockX, rowY, BUTTON_WIDTH, 20).build()));
+            }
         }
     }
 
-    private void onDelete(String modelId, String modelName) {
-        if (!ClientPaths.skipDeleteConfirm()) {
-            Minecraft.getInstance().setScreen(new DeleteConfirmScreen(this, modelId, modelName));
+    private void confirm(String modelId, String modelName, DeleteConfirmScreen.Mode mode) {
+        var minecraft = Minecraft.getInstance();
+        if (mode == DeleteConfirmScreen.Mode.UNBLOCK
+            || (mode == DeleteConfirmScreen.Mode.DELETE && ClientPaths.skipDeleteConfirm())
+            || (mode == DeleteConfirmScreen.Mode.DELETE_BLOCK && ClientPaths.skipDeleteConfirm())) {
+            var command = switch (mode) {
+                case DELETE -> "ysmrelay delete " + modelId + " confirm";
+                case DELETE_BLOCK -> "ysmrelay deleteblock " + modelId + " confirm";
+                case UNBLOCK -> "ysmrelay unblock " + modelId;
+            };
+            if (minecraft.getConnection() != null) {
+                minecraft.getConnection().sendCommand(command);
+            }
+            refreshIn = 30;
             return;
         }
-        var minecraft = Minecraft.getInstance();
-        if (minecraft.getConnection() != null) {
-            minecraft.getConnection().sendCommand("ysmrelay delete " + modelId + " confirm");
-        }
-        refreshIn = 30;
+        minecraft.setScreen(new DeleteConfirmScreen(this, modelId, modelName, mode));
     }
 
     @Override
     public void tick() {
         super.tick();
         if (refreshIn > 0 && --refreshIn == 0) {
-            ClientLists.request(DataRequest.KIND_MANAGED);
+            ClientLists.request(kind());
         }
     }
 
@@ -155,7 +191,8 @@ public final class ModelManagerScreen extends Screen {
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         renderBackground(graphics);
         graphics.drawCenteredString(font, title, width / 2, 18, 0xFFFFFF);
-        var hint = Component.translatable("screen.ysm_relay.manage.columns").getString();
+        var hint = Component.translatable(blockedView
+            ? "screen.ysm_relay.manage.blocked_columns" : "screen.ysm_relay.manage.columns").getString();
         graphics.drawString(font, hint, width / 2 - 230, 62, 0x808080, false);
         super.render(graphics, mouseX, mouseY, partialTick);
 
@@ -168,20 +205,27 @@ public final class ModelManagerScreen extends Screen {
             var left = width / 2 - 230;
             graphics.drawString(font, trim(uploaderOf(entry), COL_UPLOADER), left, textY, 0xA0A0A0, false);
             var nameLeft = left + COL_UPLOADER;
-            var nameWidth = 440 - COL_UPLOADER - COL_SIZE;
+            var nameWidth = 440 - COL_UPLOADER - COL_SIZE - ACTION_WIDTH - BUTTON_GAP;
             graphics.drawString(font, trim(entry.fileName() == null ? "" : entry.fileName(), nameWidth),
                 nameLeft, textY, 0xFFFFFF, false);
-            var sizeText = formatSize(entry.size());
-            graphics.drawString(font, sizeText,
-                width / 2 + 240 - DELETE_WIDTH - 6 - font.width(sizeText), textY, 0xB0B0B0, false);
+            var lastColumn = blockedView
+                ? "#" + shortId(entry.modelId())
+                : formatSize(entry.size());
+            graphics.drawString(font, lastColumn,
+                width / 2 + 240 - ACTION_WIDTH - BUTTON_GAP - font.width(lastColumn), textY, 0xB0B0B0, false);
         }
         if (entries.isEmpty()) {
-            graphics.drawCenteredString(font, Component.translatable("screen.ysm_relay.manage.empty"),
+            graphics.drawCenteredString(font, Component.translatable(blockedView
+                    ? "screen.ysm_relay.manage.blocked_empty" : "screen.ysm_relay.manage.empty"),
                 width / 2, 90, 0x909090);
         }
         graphics.drawString(font, Component.literal((page + 1) + " / "
                 + Math.max(1, (entries.size() + PAGE_SIZE - 1) / PAGE_SIZE)).getString(),
             width / 2 + 98, height - 24, 0x808080, false);
+    }
+
+    private static String shortId(String modelId) {
+        return modelId == null || modelId.length() < 8 ? "" : modelId.substring(0, 8);
     }
 
     private String trim(String text, int maxWidth) {

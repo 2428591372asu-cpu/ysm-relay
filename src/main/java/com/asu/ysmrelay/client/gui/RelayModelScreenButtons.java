@@ -106,6 +106,10 @@ public final class RelayModelScreenButtons {
             // 没进世界就没有模型根可扫，弹面板只会是一片空列表。
             return;
         }
+        if (ClientSettings.disabledByServer()) {
+            minecraft.setScreen(new com.asu.ysmrelay.client.RelayDeniedScreen(screen));
+            return;
+        }
         if (ClientSettings.isRelayMissing()) {
             minecraft.setScreen(new RelayMissingScreen(event.getScreen()));
             return;

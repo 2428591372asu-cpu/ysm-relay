@@ -112,6 +112,10 @@ public final class ClientAutoUpload {
         if (ClientUploads.busy()) {
             return;
         }
+        if (ClientSettings.disabledByServer()) {
+            stopWatch();
+            return;
+        }
         var snapshot = ClientSettings.current().orElse(null);
         if (snapshot != null && (!snapshot.allowAutoUpload || snapshot.uploadMode == 0)) {
             // 服务端不允许，或当前是审批模式：不扫目录。

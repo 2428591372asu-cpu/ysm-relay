@@ -11,6 +11,8 @@ public final class DataRequest {
     public static final int KIND_MY_PENDING = 2;
     /** 服主「模型管理」列表：目录里所有模型 + 上传者。 */
     public static final int KIND_MANAGED = 3;
+    /** 服主「拉黑名单」：被禁止再次上传的模型。 */
+    public static final int KIND_BLOCKED = 4;
 
     public final int kind;
 

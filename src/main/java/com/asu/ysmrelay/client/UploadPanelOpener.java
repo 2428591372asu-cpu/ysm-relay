@@ -43,6 +43,10 @@ public final class UploadPanelOpener {
             if (minecraft.player == null) {
                 continue;
             }
+            if (ClientSettings.disabledByServer()) {
+                minecraft.setScreen(new RelayDeniedScreen(null));
+                continue;
+            }
             if (ClientSettings.isRelayMissing()) {
                 minecraft.setScreen(new RelayMissingScreen(null));
                 continue;

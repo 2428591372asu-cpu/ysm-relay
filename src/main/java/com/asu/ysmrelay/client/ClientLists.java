@@ -12,6 +12,7 @@ public final class ClientLists {
     private static volatile List<DataReply.Entry> pending = List.of();
     private static volatile List<DataReply.Entry> myPending = List.of();
     private static volatile List<DataReply.Entry> managed = List.of();
+    private static volatile List<DataReply.Entry> blocked = List.of();
 
     private ClientLists() {}
 
@@ -28,6 +29,9 @@ public final class ClientLists {
             myPending = List.copyOf(message.entries);
         } else if (message.kind == com.asu.ysmrelay.net.msg.DataRequest.KIND_MANAGED) {
             managed = List.copyOf(message.entries);
+            ModelManagerScreen.onData();
+        } else if (message.kind == com.asu.ysmrelay.net.msg.DataRequest.KIND_BLOCKED) {
+            blocked = List.copyOf(message.entries);
             ModelManagerScreen.onData();
         } else {
             pending = List.copyOf(message.entries);
@@ -51,10 +55,15 @@ public final class ClientLists {
         return managed;
     }
 
+    public static List<DataReply.Entry> blocked() {
+        return blocked;
+    }
+
     public static void clear() {
         mine = List.of();
         pending = List.of();
         myPending = List.of();
         managed = List.of();
+        blocked = List.of();
     }
 }

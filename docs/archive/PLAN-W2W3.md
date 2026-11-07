@@ -527,4 +527,4 @@ V0.1 到手后能验的是：装得上、C 能进服、双方协议不打架、`
 ## 13. v1 保留内容
 
 v1 §2「YSM 3.0 现成能力清单」（含 `ServerModelService.reload()` / `AuthModelsCapability` / `RawModelImporter` 的具体入口与行号）
-与 §5 风险表继续有效，见 `docs/02-YSM3.0接入点调研.md`。v1 的 M0–M4 编号已作废，全部以本文 W0–W8 为准。
+与 §5 风险表继续有效，见 `docs/YSM-INTEGRATION.md`。v1 的 M0–M4 编号已作废，全部以本文 W0–W8 为准。

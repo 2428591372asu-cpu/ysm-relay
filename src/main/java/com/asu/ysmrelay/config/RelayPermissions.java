@@ -38,7 +38,12 @@ public final class RelayPermissions {
         return player != null && effectiveLevel(player) >= RelayConfig.levelOf("manageRights");
     }
 
-    /** 能不能分发等级（授予/撤销 1–3 级）。只有 3 级自己和服主可以做。 */
+    /** 这个玩家还能不能使用本模组（0 级 = 被禁用）。 */
+    public static boolean canUseMod(ServerPlayer player) {
+        return player != null && effectiveLevel(player) > 0;
+    }
+
+    /** 能不能分发等级（授予/撤销 0–3 级）。只有 3 级自己和服主可以做。 */
     public static boolean canDistributeLevels(ServerPlayer player) {
         return player != null && effectiveLevel(player) >= 3;
     }
@@ -67,7 +72,12 @@ public final class RelayPermissions {
         if (isHost(player)) {
             level = 3;
         }
-        return Math.max(level, RelayConfig.grantedLevel(uuidOf(player)));
+        var granted = RelayConfig.grantedLevel(uuidOf(player));
+        if (granted == 0) {
+            // 显式授予 0 级 = 禁用本模组的全部功能，覆盖 op / 组 / 房主推断。
+            return 0;
+        }
+        return Math.max(level, granted);
     }
 
     /** 这个玩家是不是「这台机器的房主」（单人开 LAN 的主机）。 */

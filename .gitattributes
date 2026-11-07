@@ -1,0 +1,10 @@
+# 默认按文本处理，jar/图片走二进制
+* text=auto
+*.jar binary
+*.png binary
+*.ogg binary
+*.mca binary
+
+# Gradle wrapper 的行尾约定
+gradlew text eol=lf
+gradlew.bat text eol=crlf

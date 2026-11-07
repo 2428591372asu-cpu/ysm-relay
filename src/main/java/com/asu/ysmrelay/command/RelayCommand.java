@@ -153,6 +153,8 @@ public final class RelayCommand {
         next.removeIf(entry -> entry.startsWith(uuid + ":"));
         next.add(uuid + ":" + level);
         RelayConfig.setLevelGrants(next);
+        // 立刻把新等级推给目标，避免客户端要等重连才更新入口判断。
+        com.asu.ysmrelay.config.RelayConfigSync.send(target);
         context.getSource().sendSuccess(() -> Component.literal(
             "[ysm-relay] 已授予 " + target.getGameProfile().getName() + " 等级 " + level), true);
         return Command.SINGLE_SUCCESS;
@@ -171,6 +173,16 @@ public final class RelayCommand {
             return 0;
         }
         RelayConfig.setLevelGrants(next);
+        // 撤销后同样即时推快照（如果人还在线）。
+        try {
+            var online = context.getSource().getServer().getPlayerList()
+                .getPlayer(java.util.UUID.fromString(uuid));
+            if (online != null) {
+                com.asu.ysmrelay.config.RelayConfigSync.send(online);
+            }
+        } catch (IllegalArgumentException malformed) {
+            // uuid 是玩家输入的，格式不对时只影响即时刷新，不影响撤销本身。
+        }
         context.getSource().sendSuccess(() -> Component.literal("[ysm-relay] 已撤销 " + uuid + " 的等级"), true);
         return Command.SINGLE_SUCCESS;
     }
@@ -361,7 +373,24 @@ public final class RelayCommand {
     }
 
     /** 列出自己上传过的模型。 */
+    /** 0 级玩家不能用任何 relay 自助功能。 */
+    private static boolean requireEnabled(CommandContext<CommandSourceStack> context) {
+        var player = context.getSource().getPlayer();
+        if (player == null) {
+            context.getSource().sendFailure(Component.literal("[ysm-relay] 这条命令只能由玩家执行"));
+            return false;
+        }
+        if (!RelayPermissions.canUseMod(player)) {
+            context.getSource().sendFailure(Component.literal("[ysm-relay] 你已被管理员禁用 relay 功能"));
+            return false;
+        }
+        return true;
+    }
+
     private static int myUploads(CommandContext<CommandSourceStack> context) {
+        if (!requireEnabled(context)) {
+            return 0;
+        }
         var source = context.getSource();
         var player = source.getPlayer();
         if (player == null) {
@@ -394,6 +423,9 @@ public final class RelayCommand {
 
     /** 撤回自己上传、还没被审批的内容。 */
     private static int cancelOwn(CommandContext<CommandSourceStack> context) {
+        if (!requireEnabled(context)) {
+            return 0;
+        }
         var source = context.getSource();
         var player = source.getPlayer();
         if (player == null) {
@@ -408,6 +440,9 @@ public final class RelayCommand {
 
     /** 删除自己上传的模型。服务端按台账复核归属，删完不进制止名单。 */
     private static int deleteOwn(CommandContext<CommandSourceStack> context) {
+        if (!requireEnabled(context)) {
+            return 0;
+        }
         var source = context.getSource();
         var player = source.getPlayer();
         if (player == null) {
@@ -488,7 +523,11 @@ public final class RelayCommand {
         // 删除是不可逆的，所以要求再打一次 confirm。
         root.then(Commands.literal("delete").requires(RelayCommand::manageSource)
             .then(Commands.argument(MODEL, StringArgumentType.word())
-            .then(Commands.literal("confirm").executes(RelayCommand::delete))));
+            .then(Commands.literal("confirm").executes(context -> deleteModel(context, false)))));
+        // 删除并拉黑：删掉内容，同时禁止这个模型再次上传。
+        root.then(Commands.literal("deleteblock").requires(RelayCommand::manageSource)
+            .then(Commands.argument(MODEL, StringArgumentType.word())
+            .then(Commands.literal("confirm").executes(context -> deleteModel(context, true)))));
 
         root.then(Commands.literal("block").requires(RelayCommand::manageSource)
             .then(Commands.argument(MODEL, StringArgumentType.word())
@@ -496,6 +535,13 @@ public final class RelayCommand {
         root.then(Commands.literal("unblock").requires(RelayCommand::manageSource)
             .then(Commands.argument(MODEL, StringArgumentType.word())
             .executes(RelayCommand::unblock)));
+
+        var blockedList = Commands.literal("blocked").requires(RelayCommand::manageSource);
+        blockedList.executes(context -> blockedList(context, 1));
+        blockedList.then(Commands.argument("page", com.mojang.brigadier.arguments.IntegerArgumentType.integer(1))
+            .executes(context -> blockedList(context,
+                com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(context, "page"))));
+        root.then(blockedList);
 
         var blockUploader = Commands.literal("blockuploader").requires(RelayCommand::manageSource);
         blockUploader.then(Commands.literal("add")
@@ -519,7 +565,7 @@ public final class RelayCommand {
             .requires(RelayCommand::distributorSource);
         level.then(Commands.literal("grant")
             .then(Commands.argument(TARGETS, EntityArgument.player())
-                .then(Commands.argument("level", IntegerArgumentType.integer(1, 3))
+                .then(Commands.argument("level", IntegerArgumentType.integer(0, 3))
                     .executes(RelayCommand::levelGrant))));
         level.then(Commands.literal("revoke")
             .then(Commands.argument("uuid", StringArgumentType.word()).executes(RelayCommand::levelRevoke)));
@@ -773,7 +819,7 @@ public final class RelayCommand {
         return Command.SINGLE_SUCCESS;
     }
 
-    private static int delete(CommandContext<CommandSourceStack> context) {
+    private static int deleteModel(CommandContext<CommandSourceStack> context, boolean block) {
         if (!requireManage(context)) {
             return 0;
         }
@@ -797,9 +843,12 @@ public final class RelayCommand {
             source.sendFailure(Component.literal("[ysm-relay] " + result.message()));
             return 0;
         }
-        // 记进禁止名单：否则上传通道下个探测就会把这个 modelId 又收回来，删除等于没删。
-        admin.block(modelId);
-        source.sendSuccess(() -> Component.literal("[ysm-relay] " + result.message() + "，已加入禁止上传名单"), true);
+        if (block) {
+            // 只有「删除并拉黑」才进禁止名单；普通删除允许玩家再传回来。
+            admin.block(modelId, uploadDisplayName(modelId));
+        }
+        var suffix = block ? "，已加入禁止上传名单" : "";
+        source.sendSuccess(() -> Component.literal("[ysm-relay] " + result.message() + suffix), true);
         return Command.SINGLE_SUCCESS;
     }
 
@@ -813,11 +862,23 @@ public final class RelayCommand {
             source.sendFailure(Component.literal("[ysm-relay] " + resolved.error()));
             return 0;
         }
-        AuthAdmin.get().block(resolved.modelId());
-        var shortId = resolved.modelId().toString().substring(0, 12);
+        var blockedId = resolved.modelId();
+        AuthAdmin.get().block(blockedId, uploadDisplayName(blockedId));
+        var shortId = blockedId.toString().substring(0, 12);
         source.sendSuccess(() -> Component.literal("[ysm-relay] " + shortId + " 已禁止再次上传（不影响已在服务端的文件）"),
             true);
         return Command.SINGLE_SUCCESS;
+    }
+
+    /** 禁止项展示名：优先台账里的原始文件名，其次 YSM 目录展示名，最后退回目录地址末段。 */
+    private static String uploadDisplayName(Hash256 modelId) {
+        return UploadRegistry.get().find(modelId)
+            .map(UploadRegistry.Entry::fileName)
+            .filter(name -> name != null && !name.isBlank())
+            .orElseGet(() -> YsmBridge.displayName(modelId)
+                .orElseGet(() -> YsmBridge.displayPath(modelId)
+                    .map(path -> path.substring(path.lastIndexOf('/') + 1))
+                    .orElse("")));
     }
 
     private static int unblock(CommandContext<CommandSourceStack> context) {
@@ -825,20 +886,42 @@ public final class RelayCommand {
             return 0;
         }
         var source = context.getSource();
-        // 被删除的模型已经不在 catalog 里，resolveModel 找不到它，所以这里允许直接给完整哈希。
-        var token = StringArgumentType.getString(context, MODEL).trim().toLowerCase(Locale.ROOT);
-        if (token.length() != Hash256.SIZE * 2 || !token.chars().allMatch(RelayCommand::isHexChar)) {
-            source.sendFailure(Component.literal("[ysm-relay] 取消禁止需要完整 64 位 modelId（被删的模型已不在目录里）"));
-            return 0;
+        var raw = StringArgumentType.getString(context, MODEL).trim();
+        var token = raw.toLowerCase(Locale.ROOT);
+        Hash256 modelId = null;
+        var admin = AuthAdmin.get();
+        if (token.length() == Hash256.SIZE * 2 && token.chars().allMatch(RelayCommand::isHexChar)) {
+            try {
+                modelId = Hash256.parse(token);
+            } catch (IllegalArgumentException malformed) {
+                source.sendFailure(Component.literal("[ysm-relay] 模型哈希格式非法：" + raw));
+                return 0;
+            }
+        } else {
+            // 支持用拉黑时记下的模型名或哈希前缀解除。
+            var matches = new java.util.ArrayList<Hash256>();
+            var names = new java.util.ArrayList<String>();
+            for (var candidate : admin.blockedModels()) {
+                var name = admin.blockedName(candidate);
+                var nameHit = !name.isBlank() && name.equalsIgnoreCase(raw);
+                var prefixHit = token.length() >= 4 && candidate.toString().startsWith(token);
+                if (nameHit || prefixHit) {
+                    matches.add(candidate);
+                    names.add(name.isBlank() ? candidate.toString().substring(0, 12) : name);
+                }
+            }
+            if (matches.isEmpty()) {
+                source.sendFailure(Component.literal("[ysm-relay] 禁止名单里没有叫 " + raw + " 的模型，/ysmrelay blocked 可查看"));
+                return 0;
+            }
+            if (matches.size() > 1) {
+                source.sendFailure(Component.literal("[ysm-relay] 匹配到 " + matches.size()
+                    + " 个禁止项：" + String.join(", ", names.subList(0, Math.min(5, names.size()))) + "，请给更多位数"));
+                return 0;
+            }
+            modelId = matches.get(0);
         }
-        Hash256 modelId;
-        try {
-            modelId = Hash256.parse(token);
-        } catch (IllegalArgumentException malformed) {
-            source.sendFailure(Component.literal("[ysm-relay] 模型哈希格式非法：" + token));
-            return 0;
-        }
-        var removed = AuthAdmin.get().unblock(modelId);
+        var removed = admin.unblock(modelId);
         var text = removed ? "已允许重新上传该模型" : "该模型本来就不在禁止名单里";
         source.sendSuccess(() -> Component.literal("[ysm-relay] " + text), true);
         return Command.SINGLE_SUCCESS;
@@ -935,6 +1018,43 @@ public final class RelayCommand {
         }
 
         return Resolution.fail("无法识别的模型写法：" + text + "（给 64 位哈希、哈希前缀，或 local:auth/xxx.mxc）");
+    }
+
+    /** 列出模型级禁止上传名单，每页 8 条，可按名字或哈希前缀解除。 */
+    private static int blockedList(CommandContext<CommandSourceStack> context, int page) {
+        if (!requireManage(context)) {
+            return 0;
+        }
+        var source = context.getSource();
+        var admin = AuthAdmin.get();
+        var all = new ArrayList<Hash256>(admin.blockedModels());
+        if (all.isEmpty()) {
+            source.sendSuccess(() -> Component.literal("[ysm-relay] 禁止上传名单为空"), false);
+            return Command.SINGLE_SUCCESS;
+        }
+        all.sort(java.util.Comparator.comparing(modelId -> {
+            var name = admin.blockedName(modelId);
+            return name.isBlank() ? modelId.toString() : name.toLowerCase(Locale.ROOT);
+        }));
+        var pageSize = 8;
+        var maxPage = (all.size() + pageSize - 1) / pageSize;
+        var index = Math.max(1, Math.min(page, maxPage));
+        var start = (index - 1) * pageSize;
+        source.sendSuccess(() -> Component.literal("[ysm-relay] 禁止上传 " + all.size() + " 条（第 "
+            + index + "/" + maxPage + " 页）："), false);
+        for (var i = start; i < Math.min(all.size(), start + pageSize); i++) {
+            var modelId = all.get(i);
+            var name = admin.blockedName(modelId);
+            var uploader = UploadRegistry.get().find(modelId)
+                .map(UploadRegistry.Entry::uploaderName).orElse("");
+            var line = "  #" + modelId.toString().substring(0, 12)
+                + "  " + (name.isBlank() ? "（未记录名字）" : name)
+                + (uploader.isBlank() ? "" : "  · " + uploader);
+            source.sendSuccess(() -> Component.literal(line), false);
+        }
+        source.sendSuccess(() -> Component.literal(
+            "[ysm-relay] 解除：/ysmrelay unblock <名字或哈希前缀>"), false);
+        return Command.SINGLE_SUCCESS;
     }
 
     private static boolean isHexChar(int value) {

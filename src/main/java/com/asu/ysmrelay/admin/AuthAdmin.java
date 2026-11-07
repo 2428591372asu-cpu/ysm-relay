@@ -81,6 +81,8 @@ public final class AuthAdmin {
      * 否则玩家可以立刻把同一份模型再传回来，删除等于没删。
      */
     private final Set<Hash256> blocked = new LinkedHashSet<>();
+    /** 拉黑时顺手记下的模型名，便于用名字解除。旧文件里没有这一项时为空。 */
+    private final Map<Hash256, String> blockedNames = new LinkedHashMap<>();
 
     private AuthAdmin(Path file) {
         this.file = file;
@@ -145,6 +147,15 @@ public final class AuthAdmin {
                     }
                 }
             }
+            if (stored != null && stored.blockedNames != null) {
+                stored.blockedNames.forEach((hex, name) -> {
+                    try {
+                        admin.blockedNames.put(Hash256.parse(hex), name == null ? "" : name);
+                    } catch (IllegalArgumentException malformed) {
+                        YsmRelay.LOGGER.warn("[ysm-relay] authz.json 里的禁止项名字非法，已跳过: {}", hex);
+                    }
+                });
+            }
         } catch (IOException | JsonParseException failure) {
             YsmRelay.LOGGER.error("[ysm-relay] 读取 {} 失败，按空授权矩阵继续", file, failure);
         }
@@ -163,14 +174,33 @@ public final class AuthAdmin {
 
     /** 记下「这个模型被删除了」，并落盘。 */
     public synchronized void block(Hash256 modelId) {
-        if (blocked.add(modelId)) {
+        block(modelId, null);
+    }
+
+    /** 记下禁止项，同时保存模型名（用于按名字解除）。 */
+    public synchronized void block(Hash256 modelId, String name) {
+        var changed = blocked.add(modelId);
+        var clean = name == null ? "" : name.trim();
+        if (!clean.isEmpty() && !clean.equals(blockedNames.get(modelId))) {
+            blockedNames.put(modelId, clean);
+            changed = true;
+        }
+        if (changed) {
             save();
         }
+    }
+
+    /** 禁止项当时记下的模型名；没有记录时为空串。 */
+    public synchronized String blockedName(Hash256 modelId) {
+        return blockedNames.getOrDefault(modelId, "");
     }
 
     /** 取消禁止（允许重新上传同一个模型）。 */
     public synchronized boolean unblock(Hash256 modelId) {
         var removed = blocked.remove(modelId);
+        if (blockedNames.remove(modelId) != null) {
+            removed = true;
+        }
         if (removed) {
             save();
         }
@@ -220,6 +250,12 @@ public final class AuthAdmin {
         });
         stored.blocked = new ArrayList<>();
         blocked.forEach(modelId -> stored.blocked.add(modelId.toString()));
+        stored.blockedNames = new LinkedHashMap<>();
+        blockedNames.forEach((modelId, name) -> {
+            if (name != null && !name.isBlank()) {
+                stored.blockedNames.put(modelId.toString(), name);
+            }
+        });
         try {
             Files.createDirectories(file.getParent());
             var temp = file.resolveSibling(file.getFileName() + ".tmp");
@@ -346,6 +382,7 @@ public final class AuthAdmin {
         int version;
         Map<String, StoredRule> models;
         List<String> blocked;
+        Map<String, String> blockedNames;
     }
 
     private static final class StoredRule {

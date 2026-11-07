@@ -5,16 +5,15 @@ build/
 
 # 运行目录
 run/
+logs/
+*.log
 
 # 本地配置
 local.properties
 
-# 生成的本地产物：由 ysmDevJar 从 ../ysm 的 class 目录重打，不入库
+# 本地重新生成的 YSM dev jar；仓库自带的一份要入仓，不要忽略
 libs/*.jar
-
-# 日志
-logs/
-*.log
+!libs/ysm-3.0-dev-compileonly.jar
 
 # IDE
 .idea/

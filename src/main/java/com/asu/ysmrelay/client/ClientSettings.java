@@ -45,6 +45,12 @@ public final class ClientSettings {
      * 服务端在登录时把注册过的通道下发给客户端，{@code isRemotePresent} 直接读这份表。
      * 没有本通道 = 确定没装；有通道但没回配置 = 只是卡，不该拦人。
      */
+    /** 服务端已把当前玩家设为 0 级（禁用 relay 功能）。 */
+    public static boolean disabledByServer() {
+        var current = snapshot;
+        return current != null && current.effectiveLevel <= 0;
+    }
+
     public static boolean isRelayMissing() {
         var minecraft = net.minecraft.client.Minecraft.getInstance();
         var listener = minecraft.getConnection();

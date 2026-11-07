@@ -7,6 +7,7 @@ import com.asu.ysmrelay.upload.PendingQueue;
 import com.asu.ysmrelay.upload.UploadRegistry;
 import java.util.ArrayList;
 import java.util.Locale;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 
 /**
@@ -108,6 +109,27 @@ public final class RelayLists {
                         // 文件刚好被删掉，按 0 报
                     }
                     entries.add(new DataReply.Entry(entry.getKey().toString(), label, size, uploader));
+                }
+            }
+        } else if (kind == DataRequest.KIND_BLOCKED) {
+            if (RelayPermissions.canManage(player)) {
+                var admin = com.asu.ysmrelay.admin.AuthAdmin.get();
+                var models = new java.util.ArrayList<>(admin.blockedModels());
+                models.sort(java.util.Comparator.comparing(modelId -> {
+                    var name = admin.blockedName(modelId);
+                    return name.isBlank() ? modelId.toString() : name.toLowerCase(Locale.ROOT);
+                }));
+                for (var modelId : models) {
+                    var name = admin.blockedName(modelId);
+                    var label = name.isBlank()
+                        ? Component.translatable("screen.ysm_relay.manage.no_name").getString() : name;
+                    var uploader = UploadRegistry.get().find(modelId)
+                        .map(UploadRegistry.Entry::uploaderName).orElse("");
+                    budget -= estimate(label) + 64;
+                    if (entries.size() >= limit || budget <= 0) {
+                        break;
+                    }
+                    entries.add(new DataReply.Entry(modelId.toString(), label, 0L, uploader));
                 }
             }
         } else if (kind == DataRequest.KIND_PENDING) {

@@ -1,6 +1,6 @@
 # ysm-relay 使用说明
 
-给玩家和服主看的。命令细节见 [ADMIN.md](ADMIN.md)，技术背景见 [02-YSM3.0接入点调研.md](02-YSM3.0接入点调研.md)。
+给玩家和服主看的。命令细节见 [ADMIN.md](ADMIN.md)，技术背景见 [YSM-INTEGRATION.md](YSM-INTEGRATION.md)。
 
 ## 这个 mod 解决什么
 
@@ -77,7 +77,10 @@ ysm-relay 补上反过来的那一段：
 /ysmrelay paths                  看目录与实际文件数（排障第一步）
 /ysmrelay pending                看待审队列
 /ysmrelay approve <编号> / reject <编号>
-/ysmrelay delete <模型> confirm  删除并禁止再次上传
+/ysmrelay delete <模型> confirm       只删除
+/ysmrelay deleteblock <模型> confirm  删除并禁止再次上传
+/ysmrelay blocked [页码]              查看禁止名单
+/ysmrelay unblock <名字或哈希>         解除禁止
 ```
 
 ### 用界面管理模型
@@ -85,7 +88,8 @@ ysm-relay 补上反过来的那一段：
 设置页最下面新增「模型管理」块：
 
 - 「服主本地」分组排最前，之后是玩家分组，组名按 A–Z 排序
-- 每行是一个模型，点一下变成「确认删除 xxx？」，5 秒内再点一次才会真删
+- 每行两个按钮：「删除」只删内容，允许再次上传；「拉黑」会删除并禁止上传，确认框会写明这一点
+- 切到「拉黑名单」分页可以看被禁传的模型，并直接解除
 - 顶部「刷新模型列表」重新拉取
 
 删除走的是和命令同一条链路：清源文件 + 清 YSM 转换缓存 + 重扫。

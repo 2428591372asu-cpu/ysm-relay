@@ -140,6 +140,11 @@ public final class UploadService {
             reply(player, ProbeReply.denied(UploadResult.REJECTED_POLICY, "本服没有开启玩家模型上传"));
             return;
         }
+        // 0 级 = 被管理员禁用，任何上传路径都不放行（白名单也不行）。
+        if (RelayPermissions.effectiveLevel(player) <= 0) {
+            reply(player, ProbeReply.denied(UploadResult.REJECTED_POLICY, "你已被管理员禁用 relay 功能"));
+            return;
+        }
         // 白名单玩家：免审核、免个人配额、免权限等级；资源类守卫（总闸、拉黑、体积、总量）照样成立。
         var whitelisted = RelayPermissions.isUploadWhitelisted(player);
         var requiredLevel = RelayConfig.UPLOAD_PERMISSION_LEVEL.get();

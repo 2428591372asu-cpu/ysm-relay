@@ -31,6 +31,10 @@ repositories {
 // YSM 主仓 = DSHwork\YSM\ysm，两者同级 ⇒ ../ysm。整理前的旧路径是 ../YesSteveModel。
 //
 // 运行时由真实安装的 ysm-3.0 jar 提供这些类，绝对不能打进本 mod 的 jar。
+//
+// 仓库里已经放了一份编译好的 libs/ysm-3.0-dev-compileonly.jar（Apache-2.0），
+// 所以「克隆 → ./gradlew build」不需要再准备 YSM 源码。
+// 只有想用自己改过的 YSM 时才需要设 YSM_PROJECT_DIR 并重新生成这份 jar。
 // ---------------------------------------------------------------------------
 def ysmProjectDir = providers.environmentVariable('YSM_PROJECT_DIR')
         .map { file(it) }
@@ -38,18 +42,24 @@ def ysmProjectDir = providers.environmentVariable('YSM_PROJECT_DIR')
 def ysmClassesDir = new File(ysmProjectDir, 'build/classes/java/main')
 def ysmDevJarDir = layout.projectDirectory.dir('libs')
 def ysmDevJarName = 'ysm-3.0-dev-compileonly.jar'
+def ysmDevJarFile = ysmDevJarDir.file(ysmDevJarName).asFile
 
 tasks.register('ysmDevJar', Jar) {
     group = 'build setup'
-    description = '把 YSM 主仓的 compileJava 产物打成本地 compileOnly jar'
+    description = '本地 YSM 有编译产物时，重新生成 compileOnly jar（仓库自带的版本可直接用）'
     archiveFileName = ysmDevJarName
     destinationDirectory = ysmDevJarDir
     from(ysmClassesDir)
+    onlyIf {
+        // 仓库已带一份；只有明确指向了本地 YSM 且它确实编译过时才重打。
+        !ysmDevJarFile.exists() && ysmClassesDir.isDirectory()
+    }
     doFirst {
         if (!ysmClassesDir.isDirectory()) {
             throw new GradleException(
-                    "找不到 YSM 编译产物: ${ysmClassesDir}\n" +
-                    "请先在 YSM 主仓执行 compileJava（或设置环境变量 YSM_PROJECT_DIR 指向正确目录）。\n" +
+                    "仓库自带的 ${ysmDevJarFile} 不存在，且找不到 YSM 编译产物: ${ysmClassesDir}\n" +
+                    "请重新 clone 仓库（libs/ 里应带一份 dev jar），" +
+                    "或在 YSM 主仓执行 compileJava（或用 YSM_PROJECT_DIR 指向编译好的目录）。\n" +
                     "当前 YSM_PROJECT_DIR = ${ysmProjectDir}")
         }
     }
